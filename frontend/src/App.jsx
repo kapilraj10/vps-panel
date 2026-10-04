@@ -1,89 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
-import { io } from 'socket.io-client';
 import {
   AreaChart, Area, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts';
-
-const MAX_POINTS = 720;
-
-// ---------- formatting ----------
-function bytes(n) {
-  if (!n && n !== 0) return '–';
-  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let v = n;
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i += 1; }
-  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
-}
-const pct = (used, total) => (total ? Math.round((used / total) * 1000) / 10 : 0);
-const clock = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-function uptime(s) {
-  if (!s) return '–';
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
-}
-function ago(t) {
-  if (!t) return 'never';
-  const s = Math.round((Date.now() - t) / 1000);
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  return `${Math.round(s / 3600)}h ago`;
-}
-const level = (p) => (p >= 90 ? 'alarm' : p >= 75 ? 'warn' : 'ok');
-
-// Recharts needs real colour values, so read them from the CSS tokens
-function useColors() {
-  const read = () => {
-    const s = getComputedStyle(document.documentElement);
-    const v = (n) => s.getPropertyValue(n).trim();
-    return { muted: v('--muted'), line: v('--line'), signal: v('--signal'), ram: v('--ram'), surface: v('--surface'), ink: v('--ink') };
-  };
-  const [c, setC] = useState(read);
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const update = () => setC(read());
-    mq.addEventListener('change', update);
-    return () => mq.removeEventListener('change', update);
-  }, []);
-  return c;
-}
-
-// ---------- pieces ----------
-function Meter({ label, value, detail, percent }) {
-  const p = Math.min(100, Math.max(0, percent ?? 0));
-  return (
-    <div className={`meter meter--${level(p)}`}>
-      <span className="meter__label">{label}</span>
-      <div className="meter__track" role="meter" aria-valuenow={p} aria-valuemin={0} aria-valuemax={100} aria-label={label}>
-        <div className="meter__fill" style={{ width: `${p}%` }} />
-      </div>
-      <span className="meter__value">{value}</span>
-      <span className="meter__detail">{detail}</span>
-    </div>
-  );
-}
-
-function ChartTip({ active, payload, label, unit }) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div className="tip">
-      <div className="tip__time">{clock(label)}</div>
-      {payload.map((p) => (
-        <div key={p.dataKey} className="tip__row">
-          <span className="tip__dot" style={{ background: p.color }} />
-          {p.name}: <strong>{p.value}{unit}</strong>
-        </div>
-      ))}
-    </div>
-  );
-}
+import {
+  MAX_POINTS, bytes, pct, clock, uptime, ago, useColors, Meter, ChartTip,
+} from './lib.jsx';
 
 // ---------- app ----------
-export default function App() {
+// Host overview (admins only). The socket is shared with the rest of the panel.
+export default function App({ socket, status }) {
   const colors = useColors();
-  const [status, setStatus] = useState('connecting');
   const [info, setInfo] = useState(null);
   const [history, setHistory] = useState([]);
   const [apps, setApps] = useState([]);
@@ -91,25 +17,28 @@ export default function App() {
   const [up, setUp] = useState(0);
 
   useEffect(() => {
-    const socket = io({ transports: ['websocket', 'polling'] });
-    socket.on('connect', () => setStatus('live'));
-    socket.on('disconnect', () => setStatus('offline'));
-    socket.on('connect_error', () => setStatus('offline'));
-    socket.on('init', (d) => {
+    const onInit = (d) => {
       setInfo(d.info);
       setHistory(d.history.slice(-MAX_POINTS));
       setApps(d.apps);
       setProcs(d.processes);
       setUp(d.uptime);
-    });
-    socket.on('sample', (d) => {
+    };
+    const onSample = (d) => {
       setHistory((h) => [...h.slice(-(MAX_POINTS - 1)), d.point]);
       setApps(d.apps);
       setProcs(d.processes);
       setUp(d.uptime);
-    });
-    return () => socket.disconnect();
-  }, []);
+    };
+    // The socket may have connected before this tab was opened, so also load a snapshot
+    fetch('/api/snapshot', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).then((d) => d && onInit(d)).catch(() => {});
+    socket.on('init', onInit);
+    socket.on('sample', onSample);
+    return () => {
+      socket.off('init', onInit);
+      socket.off('sample', onSample);
+    };
+  }, [socket]);
 
   const sampleMs = info?.sampleMs || 5000;
   const last = history.at(-1);
