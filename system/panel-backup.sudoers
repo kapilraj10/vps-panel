@@ -1,0 +1,6 @@
+# /etc/sudoers.d/panel-backup  (install with mode 0440, check with: sudo visudo -cf <file>)
+# Lets the panel user run ONLY the backup helper as root, without a password.
+# The helper whitelists its own subcommands and validates every argument.
+# env_reset: the caller cannot pass environment variables through to the helper.
+Defaults!/usr/local/sbin/panel-backup env_reset
+kapil ALL=(root) NOPASSWD: /usr/local/sbin/panel-backup

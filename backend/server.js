@@ -11,6 +11,7 @@ import {
 } from './auth.js';
 import { users, sessions, audit, USERNAME_RE, CONTAINER_RE, MIN_PASSWORD } from './db.js';
 import { createContainerMonitor, roomFor } from './containers.js';
+import { createBackups } from './backups.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -181,6 +182,7 @@ const io = new Server(server, {
 const containers = createContainerMonitor({
   io, sampleMs: SAMPLE_MS, maxPoints: MAX_POINTS, hostCores: () => info?.cores || 1, hostMem: () => hostMem,
 });
+const backups = createBackups({ io, containers });
 
 // Your other apps send request counts here (see panel-tracker.js).
 // Machine-to-machine: protected by INGEST_TOKEN instead of a login session.
@@ -401,6 +403,9 @@ app.get('/api/audit', requireAdmin, (req, res) => {
   res.json({ entries: audit.recent(limit, before) });
 });
 
+// ---------- backups (admin) ----------
+app.use('/api/backups', requireAdmin, backups.router);
+
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
 
 // Logged-in pages
@@ -443,3 +448,4 @@ server.listen(PORT, HOST, () => {
 });
 loop();
 containers.start();
+backups.start();

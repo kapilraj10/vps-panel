@@ -4,12 +4,14 @@ import App from './App.jsx';
 import ContainerCard from './ContainerCard.jsx';
 import Users from './Users.jsx';
 import Audit from './Audit.jsx';
+import Backups from './Backups.jsx';
 import { api, setCsrf, MAX_POINTS, Dialog } from './lib.jsx';
 
 const ADMIN_PAGES = [
   ['overview', 'Overview'],
   ['containers', 'Containers'],
   ['users', 'Users'],
+  ['backups', 'Backups'],
   ['audit', 'Audit log'],
 ];
 
@@ -127,6 +129,8 @@ export default function Panel() {
       : <section className="panel"><p className="empty empty--left">No LXD containers found (or LXD is not reachable).</p></section>;
   } else if (current === 'users') {
     body = <Users me={me} />;
+  } else if (current === 'backups') {
+    body = <Backups socket={socket} />;
   } else {
     body = <Audit />;
   }

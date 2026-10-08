@@ -1,0 +1,34 @@
+{
+  "targets": {
+    "containers": true,
+    "host": true,
+    "databases": true,
+    "pm2": true
+  },
+  "containerExclude": [],
+  "optimizedStorage": false,
+  "hostPaths": [
+    "/home/kapil",
+    "/etc",
+    "/root",
+    "/var/lib/docker/volumes",
+    "/opt"
+  ],
+  "excludes": [
+    "node_modules",
+    ".cache",
+    "*.log",
+    ".next/cache"
+  ],
+  "schedule": {
+    "enabled": true,
+    "time": "02:30",
+    "timezone": "Asia/Kathmandu"
+  },
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 3
+  },
+  "pm2User": "kapil"
+}

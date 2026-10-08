@@ -240,3 +240,147 @@ Add their emails to the Access policy (recommended: Access in front + panel logi
   start/restart/stop (when it was requested and whether it succeeded).
 - Membership in the `lxd` group is effectively root on the host, so the panel process now has root-level power over LXD. Keep the panel
   updated, keep `.env` private, and keep Cloudflare Access in front if you can.
+
+---
+
+## Backups
+
+The **Backups** tab (admin only) backs the server up to the HDD mounted at `/mnt/backup`:
+
+- **LXD containers:** every container, found at run time, via `lxc export --instance-only` → `containers/<name>/<id>.tar.gz`
+- **Host files:** incremental rsync snapshots (`--link-dest`, so unchanged files cost no space) → `host/<id>/...`
+- **Databases:** Postgres / MySQL / MariaDB / MongoDB containers found in Docker, dumped with `docker exec` → `databases/<id>/*.gz`
+- **PM2:** `pm2 save`, then `dump.pm2` is copied → `pm2/<id>/dump.pm2`
+
+### How it fits together
+- The panel never runs as root. Everything privileged goes through **one root-owned helper**, `/usr/local/sbin/panel-backup`
+  (source: `system/panel-backup`, plain Node with no dependencies). The panel runs it with `sudo -n`, and `/etc/sudoers.d/panel-backup`
+  allows `kapil` to run that one file and nothing else. The helper whitelists its subcommands and validates every argument
+  (container names `^[a-z0-9][a-z0-9-]*$`, backup ids `YYYYMMDD-HHMMSS`, snapshot paths without `..` or symlinks). Every command it runs gets an argument array, never a shell string.
+- Backups run in **`panel-backup.service`**, started by **`panel-backup.timer`** (daily) or by "Backup now". A backup therefore keeps going if the
+  panel restarts, and the timer works while the panel is down. Only one job runs at a time (systemd plus a `flock` lock); a second request
+  gets "already running".
+- **Safety checks before every write:**
+  - `/mnt/backup` must be a real mount (`findmnt`) on a different device than `/`, and carry the marker file `.panel-backup-id`.
+  - The mount is re-checked before each step.
+  - The estimated size must fit in 90% of the free space.
+- Each backup is written as `*.partial` and renamed only when everything worked. `runs/<id>/manifest.json`, with the sha256 of every file,
+  is written **last**, so a backup without one never counts as good. **Verify** re-checks all checksums.
+- **Retention** (default 7 daily, 4 weekly, 3 monthly) runs only after a successful backup, and never removes the newest good backup.
+- Settings live in `/etc/panel-backup/config.json`. Job records and logs (small text files) live in `/var/lib/panel-backup` on the SSD,
+  readable by the panel. The panel copies them into SQLite (`backup_jobs`) and writes every start, finish, failure, settings change,
+  verify, restore and download to the **Audit log**.
+- **Restore:**
+  - Containers are imported only under a **new** name, after you type that name. The copy gets new MAC addresses, is not started, and has autostart off.
+  - Host files: browse a snapshot and download a file or folder as `.tar.gz`.
+  - Database dumps are download-only.
+
+### Backups: install (once, on the server)
+
+Run these one at a time, as `kapil`. Lines starting with `#` are notes, not commands.
+
+```
+# 1. Tools (smartmontools gives the SMART health on the page; optional)
+sudo apt install -y rsync smartmontools
+# The helper needs Node at /usr/bin/node (apt "nodejs"). This must print a path, not an error:
+ls -l /usr/bin/node
+
+# 2. Find the HDD and its UUID (look for the ext4 partition on the HDD, e.g. sdb1)
+lsblk -f
+
+# 3. Mount point. chattr +i (while NOTHING is mounted there) makes the empty folder on the SSD read-only,
+#    so nothing can ever be written to the SSD if the HDD is missing
+sudo mkdir -p /mnt/backup
+# Must say "/mnt/backup is not a mountpoint". If the HDD is mounted, run: sudo umount /mnt/backup
+mountpoint /mnt/backup
+sudo chattr +i /mnt/backup
+echo 'UUID=PUT-THE-HDD-UUID-HERE /mnt/backup ext4 defaults,nofail,noatime 0 2' | sudo tee -a /etc/fstab
+sudo systemctl daemon-reload
+sudo mount /mnt/backup
+findmnt /mnt/backup
+
+# 4. Install the helper, its state folder and the default settings
+cd ~/vps-panel
+sudo install -o root -g root -m 0755 system/panel-backup /usr/local/sbin/panel-backup
+sudo install -d -o root -g kapil -m 2750 /var/lib/panel-backup
+sudo install -d -o root -g root -m 0755 /etc/panel-backup
+sudo install -o root -g root -m 0644 system/config.example.json /etc/panel-backup/config.json
+
+# 5. sudoers: check the file first, then install it, then check the whole sudo config
+sudo visudo -cf system/panel-backup.sudoers
+sudo install -o root -g root -m 0440 system/panel-backup.sudoers /etc/sudoers.d/panel-backup
+sudo visudo -c
+# Must print the settings as JSON without asking for a password:
+sudo -n /usr/local/sbin/panel-backup get-config
+
+# 6. Mark the HDD as the backup disk (also creates the folders and makes /mnt/backup root-only)
+sudo panel-backup init-disk
+
+# 7. systemd units. set-config writes the schedule and enables the timer
+sudo install -o root -g root -m 0644 system/panel-backup.service system/panel-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo panel-backup set-config < /etc/panel-backup/config.json
+systemctl list-timers panel-backup.timer
+
+# 8. See what a backup would do, without writing anything
+sudo panel-backup run --dry-run
+
+# 9. Panel: build and restart (no new npm packages)
+cd ~/vps-panel/frontend && npm run build
+pm2 restart vps-panel
+```
+
+**After changing `system/panel-backup` later**, install it again (step 4, first `install` line). The panel never edits the installed copy.
+
+**Disk space on the SSD during container exports:** LXD first builds each export tarball in `/var/snap/lxd/common/lxd/backups` (on the SSD),
+then copies it to the HDD and deletes it. The helper checks there is room for the largest container and refuses otherwise.
+To have LXD build them on the HDD instead (LXD then depends on the HDD being mounted when it starts):
+```
+lxc storage create hdd-backups dir source=/mnt/backup/lxd-tmp
+lxc storage volume create hdd-backups backups
+lxc config set storage.backups_volume hdd-backups/backups
+```
+
+**Database dumps** use the official images' environment variables (`POSTGRES_USER`, `MYSQL_ROOT_PASSWORD` / `MARIADB_ROOT_PASSWORD`,
+`MONGO_INITDB_ROOT_USERNAME/PASSWORD`). If a dump fails, the error from `pg_dumpall` / `mysqldump` / `mongodump` is in the job log.
+The whole backup counts as failed (and its partial files are removed) if any selected target fails.
+
+### Useful commands
+
+| Task | Command |
+|---|---|
+| Show what would happen | `sudo panel-backup run --dry-run` |
+| Back up now from the shell | `sudo systemctl start panel-backup` |
+| Follow a running backup | `journalctl -fu panel-backup` |
+| Next scheduled run | `systemctl list-timers panel-backup.timer` |
+| Disk / SMART status | `sudo panel-backup disk-status` |
+| See what pruning would delete | `sudo panel-backup prune --dry-run` |
+| Check a backup's checksums | `sudo panel-backup verify 20261009-023000` |
+
+### Test plan
+
+1. **Unit tests** (validation, path safety, retention rules, CLI rejects bad input). No root or disk needed:
+   `node --test 'system/test/*.test.cjs'`
+2. **Disk not mounted:** `sudo umount /mnt/backup`, then `sudo panel-backup run --dry-run` → "The backup disk is not mounted". Press
+   **Backup now** in the panel → the same error. Remount with `sudo mount /mnt/backup`.
+3. **Wrong disk:** mount a scratch disk with no `.panel-backup-id` at `/mnt/backup` → "…is missing. If this is the right backup disk, run init-disk".
+4. **Too little space:** use a small loop disk as the target:
+   `truncate -s 200M /tmp/small.img && mkfs.ext4 -q /tmp/small.img && sudo umount /mnt/backup && sudo mount -o loop /tmp/small.img /mnt/backup && sudo panel-backup init-disk`,
+   then `sudo panel-backup run --dry-run` → "Not enough space". Afterwards: `sudo umount /mnt/backup && sudo mount /mnt/backup`.
+5. **Dry run:** `sudo panel-backup run --dry-run` (or **Backup now → Dry run** in the panel) lists the disk check, size estimate, every command
+   and what retention would remove. Check that nothing changed: `sudo find /mnt/backup -newer /etc/panel-backup/config.json` prints nothing new.
+6. **First real backup:** **Backup now** → live progress and log appear, then Success in the history. `sudo ls /mnt/backup/runs/` has the id.
+7. **Second backup is incremental:** run again; "New data" should be small, and `sudo du -sh /mnt/backup/host/*` shows the second snapshot is mostly hard links.
+8. **Only one at a time:** press **Backup now** while one runs (button disabled), or run `sudo systemctl start panel-backup` and
+   `sudo panel-backup verify <id>` together → "already running".
+9. **Verify:** **Verify** on a backup → "All N files match". Then corrupt a copy: `sudo sh -c 'echo x >> /mnt/backup/databases/<id>/<file>'`,
+   Verify again → reported as bad.
+10. **Failure handling:** stop a database container's credentials from working (or `sudo umount -l /mnt/backup` during a run) → the job shows
+    Failed with the error, the log stays readable, `sudo ls /mnt/backup/*/` shows no `.partial` leftovers after the next run.
+11. **Restore:** Restore → Containers → `sachin` → name `sachin-test`, type it to confirm → a stopped `sachin-test` appears on the Containers page.
+    Delete it afterwards with `lxc delete sachin-test`. Restoring to an existing name is refused.
+12. **Files / databases:** browse a snapshot, download a file and a folder (`tar -tzf` the result), download a DB dump (`gunzip -t` it).
+13. **Audit log:** every step above appears with your username (scheduled runs as `system`).
+14. **Retention:** set Keep daily = 1, weekly = 0, monthly = 0, run two backups → after the second, only it remains (`sudo panel-backup list`).
+    Put the settings back.
+15. **Timer:** set the time two minutes ahead in Settings → `systemctl list-timers panel-backup.timer` shows it; the run appears as "Scheduled".

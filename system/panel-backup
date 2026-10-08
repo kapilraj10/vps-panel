@@ -1,0 +1,1305 @@
+#!/usr/bin/node
+// panel-backup: the root helper behind the vps-panel Backups page.
+//
+// Installed root:root 0755 at /usr/local/sbin/panel-backup. The panel (user kapil) may run only this
+// file through sudo (see panel-backup.sudoers), so every subcommand and argument is whitelisted and
+// validated here, and every external command runs with an argument array (never a shell string built
+// from input). Backups are only ever written to /mnt/backup after checking that it is a real mount on a
+// different device than /. Stdlib only: this file must work on its own, outside the repo.
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const zlib = require('node:zlib');
+const readline = require('node:readline');
+const { Transform } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
+const { spawn, spawnSync } = require('node:child_process');
+
+const BACKUP_ROOT = '/mnt/backup';
+const CONFIG_PATH = '/etc/panel-backup/config.json';
+const STATE_DIR = '/var/lib/panel-backup'; // job records + logs (small text, on the SSD), group-readable by the panel
+const JOBS_DIR = path.join(STATE_DIR, 'jobs');
+const LOGS_DIR = path.join(STATE_DIR, 'logs');
+const REQUEST_FILE = '/run/panel-backup/request.json'; // "Backup now" -> the systemd service
+const LOCK_FILE = '/run/lock/panel-backup.lock';
+const TIMER_DROPIN = '/etc/systemd/system/panel-backup.timer.d/schedule.conf';
+const MARKER = '.panel-backup-id';
+const LXD_BACKUPS_DIR = '/var/snap/lxd/common/lxd/backups'; // LXD builds export tarballs here first
+const SERVICE = 'panel-backup.service';
+const TIMER = 'panel-backup.timer';
+const EXIT_BUSY = 75;
+const SPACE_MARGIN = 0.9; // estimated size must fit in 90% of the free space
+const MiB = 1024 ** 2;
+const GiB = 1024 ** 3;
+const LS_MAX = 5000;
+
+const ID_RE = /^\d{8}-\d{6}$/;
+// Must not start with a dash, so a name can never be read as an option by lxc
+const CT_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+// LXD rules for a new instance name: starts with a letter, no trailing dash
+const NEW_CT_RE = /^[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+const USER_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
+const DB_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}\.(?:sql|archive)\.gz$/;
+const DOCKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const TZ_RE = /^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+){0,2}$/;
+const HOST_PATH_RE = /^\/[A-Za-z0-9._@+/ -]*$/;
+const PROGRESS_RE = /^\s*[\d,.]+\w*\s+(\d{1,3})%\s/;
+const TARGETS = ['containers', 'host', 'databases', 'pm2'];
+const ORDER = ['pm2', 'databases', 'containers', 'host']; // quick ones first, rsync last
+
+const DEFAULTS = {
+  targets: { containers: true, host: true, databases: true, pm2: true },
+  containerExclude: [],
+  optimizedStorage: false,
+  hostPaths: ['/home/kapil', '/etc', '/root', '/var/lib/docker/volumes', '/opt'],
+  excludes: ['node_modules', '.cache', '*.log', '.next/cache'],
+  schedule: { enabled: true, time: '02:30', timezone: 'Asia/Kathmandu' },
+  retention: { daily: 7, weekly: 4, monthly: 3 },
+  pm2User: 'kapil',
+};
+
+// Fixed scripts run inside the database container (`docker exec <id> sh -c <script>`). Credentials come
+// from the container's own environment; nothing from the panel is ever put into these strings.
+const DUMPS = {
+  postgres: { ext: 'sql', script: 'exec pg_dumpall -U "${POSTGRES_USER:-postgres}"' },
+  mysql: {
+    ext: 'sql',
+    script: 'export MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}"; D=mysqldump; '
+      + 'command -v mariadb-dump >/dev/null 2>&1 && D=mariadb-dump; '
+      + 'exec "$D" -uroot --all-databases --single-transaction --routines --events',
+  },
+  mongo: {
+    ext: 'archive',
+    script: 'if [ -n "$MONGO_INITDB_ROOT_USERNAME" ]; then exec mongodump --archive --authenticationDatabase admin '
+      + '-u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD"; else exec mongodump --archive; fi',
+  },
+};
+
+const USAGE = `Usage: panel-backup <command>
+  run [--dry-run] [--targets=a,b]     back up now (normally started by panel-backup.service)
+  start [--targets=a,b] [--by=user]   ask systemd to start a backup (what "Backup now" uses)
+  disk-status | get-config | list
+  set-config                          read new settings (JSON) from stdin
+  ls <id> [path] | download <id> <path> | db-download <id> <file>
+  verify <id> | restore-container <id> <container> <new-name>
+  prune [--dry-run] | init-disk
+Targets: ${TARGETS.join(', ')}`;
+
+class UsageError extends Error {}
+
+// ---------- pure helpers (unit tested in system/test) ----------
+const isInside = (child, parent) => child === parent || child.startsWith(`${parent}/`);
+
+function checkHostPath(p) {
+  if (typeof p !== 'string' || p.length > 4096 || !HOST_PATH_RE.test(p)) {
+    throw new UsageError(`Host path "${String(p).slice(0, 80)}" must be absolute and use only letters, digits, spaces and . _ - @ + /`);
+  }
+  if (p.split('/').some((s) => s === '..' || s === '.')) throw new UsageError(`Host path ${p} must not contain . or ..`);
+  const n = path.posix.normalize(p).replace(/\/+$/, '') || '/';
+  if (n === '/') throw new UsageError('Back up specific folders, not / (it contains the backup disk itself)');
+  if (isInside(n, BACKUP_ROOT) || isInside(BACKUP_ROOT, n)) throw new UsageError(`${n} overlaps the backup disk ${BACKUP_ROOT}`);
+  for (const bad of ['/proc', '/sys', '/dev', '/run']) {
+    if (isInside(n, bad)) throw new UsageError(`${n} is a virtual filesystem and cannot be backed up`);
+  }
+  return n;
+}
+
+function checkExclude(s) {
+  if (typeof s !== 'string' || !s || s.length > 200 || /[\0\r\n]/.test(s) || /^[-+!]/.test(s) || s.trim() !== s) {
+    throw new UsageError(`Exclude pattern "${String(s).slice(0, 80)}" is not allowed (no leading - + ! or spaces, max 200 characters)`);
+  }
+  return s;
+}
+
+function checkContainer(s) {
+  if (typeof s !== 'string' || !CT_RE.test(s)) throw new UsageError(`"${String(s).slice(0, 80)}" is not a valid container name`);
+  return s;
+}
+
+function checkTimezone(tz) {
+  if (typeof tz !== 'string' || !TZ_RE.test(tz)) throw new UsageError('Timezone must look like Asia/Kathmandu');
+  try { new Intl.DateTimeFormat('en', { timeZone: tz }); } catch { throw new UsageError(`Unknown timezone ${tz}`); }
+  if (fs.existsSync('/usr/share/zoneinfo') && !fs.existsSync(path.join('/usr/share/zoneinfo', tz))) {
+    throw new UsageError(`Timezone ${tz} is not installed on this server`);
+  }
+  return tz;
+}
+
+// Validates settings from the panel (or the config file) and fills in defaults for missing keys
+function normalizeConfig(raw) {
+  const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+  if (!isObj(raw)) throw new UsageError('Settings must be a JSON object');
+  const onlyKeys = (o, keys, name) => {
+    for (const k of Object.keys(o)) if (!keys.includes(k)) throw new UsageError(`Unknown setting ${name}${k}`);
+  };
+  const sub = (v, name) => {
+    if (v === undefined) return {};
+    if (!isObj(v)) throw new UsageError(`${name} must be an object`);
+    return v;
+  };
+  const bool = (v, name, dflt) => {
+    if (v === undefined) return dflt;
+    if (typeof v !== 'boolean') throw new UsageError(`${name} must be true or false`);
+    return v;
+  };
+  const int = (v, name, min, max, dflt) => {
+    if (v === undefined) return dflt;
+    if (!Number.isInteger(v) || v < min || v > max) throw new UsageError(`${name} must be a whole number from ${min} to ${max}`);
+    return v;
+  };
+  const list = (v, name, max, check, dflt) => {
+    if (v === undefined) return dflt;
+    if (!Array.isArray(v) || v.length > max) throw new UsageError(`${name} must be a list of at most ${max} items`);
+    const out = [];
+    for (const item of v) {
+      const x = check(item);
+      if (!out.includes(x)) out.push(x);
+    }
+    return out;
+  };
+
+  onlyKeys(raw, Object.keys(DEFAULTS), '');
+  const c = structuredClone(DEFAULTS);
+  const t = sub(raw.targets, 'targets');
+  onlyKeys(t, TARGETS, 'targets.');
+  for (const k of TARGETS) c.targets[k] = bool(t[k], `targets.${k}`, c.targets[k]);
+  c.containerExclude = list(raw.containerExclude, 'containerExclude', 100, checkContainer, c.containerExclude);
+  c.optimizedStorage = bool(raw.optimizedStorage, 'optimizedStorage', c.optimizedStorage);
+  c.hostPaths = list(raw.hostPaths, 'hostPaths', 30, checkHostPath, c.hostPaths);
+  c.excludes = list(raw.excludes, 'excludes', 50, checkExclude, c.excludes);
+
+  const s = sub(raw.schedule, 'schedule');
+  onlyKeys(s, ['enabled', 'time', 'timezone'], 'schedule.');
+  c.schedule.enabled = bool(s.enabled, 'schedule.enabled', c.schedule.enabled);
+  if (s.time !== undefined) {
+    if (typeof s.time !== 'string' || !TIME_RE.test(s.time)) throw new UsageError('Schedule time must be HH:MM (24 hour)');
+    c.schedule.time = s.time;
+  }
+  if (s.timezone !== undefined) c.schedule.timezone = checkTimezone(s.timezone);
+
+  const r = sub(raw.retention, 'retention');
+  onlyKeys(r, ['daily', 'weekly', 'monthly'], 'retention.');
+  c.retention.daily = int(r.daily, 'retention.daily', 1, 90, c.retention.daily);
+  c.retention.weekly = int(r.weekly, 'retention.weekly', 0, 52, c.retention.weekly);
+  c.retention.monthly = int(r.monthly, 'retention.monthly', 0, 60, c.retention.monthly);
+
+  if (raw.pm2User !== undefined) {
+    if (typeof raw.pm2User !== 'string' || !USER_RE.test(raw.pm2User) || raw.pm2User === 'root') {
+      throw new UsageError('pm2User must be the (non-root) Linux user that runs PM2');
+    }
+    c.pm2User = raw.pm2User;
+  }
+  if (c.targets.host && !c.hostPaths.length) throw new UsageError('Add at least one host path or turn off host files');
+  if (!TARGETS.some((k) => c.targets[k])) throw new UsageError('Turn on at least one backup target');
+  return c;
+}
+
+function pickTargets(list, config) {
+  const chosen = list ?? TARGETS.filter((k) => config.targets[k]);
+  if (!Array.isArray(chosen)) throw new UsageError('Targets must be a list');
+  for (const t of chosen) if (!TARGETS.includes(t)) throw new UsageError(`Unknown target "${String(t).slice(0, 40)}"`);
+  const out = TARGETS.filter((t) => chosen.includes(t));
+  if (!out.length) throw new UsageError('No backup targets selected');
+  return out;
+}
+
+// Backup ids are the start time in the schedule's timezone: 20261008-023000
+function makeId(date, tz) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date).map((x) => [x.type, x.value]));
+  return `${p.year}${p.month}${p.day}-${p.hour}${p.minute}${p.second}`;
+}
+
+function isoWeek(id) {
+  const day = 86_400_000;
+  const dt = Date.UTC(Number(id.slice(0, 4)), Number(id.slice(4, 6)) - 1, Number(id.slice(6, 8)));
+  const weekday = (new Date(dt).getUTCDay() + 6) % 7; // Monday = 0
+  const thursday = new Date(dt + (3 - weekday) * day); // ISO weeks belong to the year of their Thursday
+  const year = thursday.getUTCFullYear();
+  const week = 1 + Math.floor((thursday.getTime() - Date.UTC(year, 0, 1)) / (7 * day));
+  return `${year}-W${String(week).padStart(2, '0')}`;
+}
+
+// Grandfather-father-son: newest good backup of each of the last N days, weeks and months.
+// The newest good backup is always kept, so pruning can never remove the only good one.
+function planRetention(ids, { daily, weekly, monthly }) {
+  const sorted = [...new Set(ids)].filter((id) => ID_RE.test(id)).sort().reverse(); // newest first
+  const keep = new Set(sorted.slice(0, 1));
+  const pick = (keyOf, n) => {
+    const buckets = new Set();
+    for (const id of sorted) {
+      const k = keyOf(id);
+      if (buckets.has(k)) continue;
+      if (buckets.size >= n) break;
+      buckets.add(k);
+      keep.add(id);
+    }
+  };
+  pick((id) => id.slice(0, 8), daily);
+  pick(isoWeek, weekly);
+  pick((id) => id.slice(0, 6), monthly);
+  return { keep: sorted.filter((id) => keep.has(id)), remove: sorted.filter((id) => !keep.has(id)) };
+}
+
+// "a//b/c/" -> ["a","b","c"]; rejects . and .. so a path can never leave the snapshot
+function splitSafePath(rel) {
+  if (typeof rel !== 'string' || rel.length > 4096 || /[\0\r\n]/.test(rel)) throw new UsageError('Invalid path');
+  const parts = rel.split('/').filter(Boolean);
+  if (parts.some((p) => p === '.' || p === '..')) throw new UsageError('Path must not contain . or .. parts');
+  return parts;
+}
+
+// Which dump to run for a Docker image (null: not a database we know)
+function dbKind(image) {
+  const repo = String(image).toLowerCase().replace(/@sha256:.*$/, '').replace(/:[^/]*$/, '');
+  const base = repo.split('/').pop();
+  if (/^mongo-express/.test(base)) return null;
+  if (/^(postgres|postgresql|postgis|timescaledb|pgvector)/.test(base)) return 'postgres';
+  if (/^(mysql|mariadb|percona)/.test(base)) return 'mysql';
+  if (/^mongo(db)?(-|$)/.test(base)) return 'mongo';
+  return null;
+}
+
+function rsyncArgs(config, { linkDest = null, dryRun = false } = {}) {
+  const a = ['-aAXH', '--one-file-system', '--relative', '--numeric-ids', '--delete', '--delete-excluded'];
+  if (dryRun) a.push('--dry-run', '--stats');
+  else a.push('--no-inc-recursive', '--info=progress2', '--stats');
+  for (const ex of config.excludes) a.push(`--exclude=${ex}`);
+  if (linkDest) a.push(`--link-dest=${linkDest}`);
+  return a;
+}
+
+const onCalendar = (s) => `*-*-* ${s.time}:00 ${s.timezone}`;
+
+function fmtBytes(n) {
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let v = Number(n) || 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i += 1; }
+  return `${i === 0 ? v : v.toFixed(1)} ${u[i]}`;
+}
+const fmtCmd = (cmd, args) => [cmd, ...args].map((a) => (/^[A-Za-z0-9_.,:=/@%+-]+$/.test(a) ? a : JSON.stringify(a))).join(' ');
+const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+
+// ---------- output ----------
+const out = (s) => process.stdout.write(`${s}\n`);
+const result = (obj) => process.stdout.write(`@@RESULT ${JSON.stringify(obj)}\n`);
+
+function makeLogger(file) {
+  const fd = file ? fs.openSync(file, 'a', 0o640) : null;
+  return (msg) => {
+    const line = `[${new Date().toTimeString().slice(0, 8)}] ${stripAnsi(String(msg))}\n`;
+    process.stdout.write(line);
+    if (fd !== null) fs.writeSync(fd, line);
+  };
+}
+
+function writeAtomic(file, data, mode) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.tmp`);
+  fs.writeFileSync(tmp, data);
+  fs.chmodSync(tmp, mode); // writeFileSync's mode is filtered by the umask
+  fs.renameSync(tmp, file);
+}
+
+// ---------- running commands ----------
+const children = new Set();
+let stopping = false;
+
+function splitLines(stream, fn) {
+  let buf = '';
+  stream.setEncoding('utf8');
+  stream.on('data', (d) => {
+    buf += d;
+    const parts = buf.split(/\r\n|\r|\n/);
+    buf = parts.pop();
+    for (const p of parts) if (p.trim()) fn(p);
+  });
+  stream.on('end', () => { if (buf.trim()) fn(buf); });
+}
+
+// Runs a command (argument array, no shell). stdout goes to `pipeTo` streams or, like stderr, to onLine.
+function exec(cmd, args, { onLine = () => {}, pipeTo = null, okCodes = [0] } = {}) {
+  if (stopping) return Promise.reject(new Error('Stopped'));
+  const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  children.add(child);
+  let lastErr = '';
+  const waits = [];
+  if (pipeTo) waits.push(pipeline(child.stdout, ...pipeTo));
+  else splitLines(child.stdout, onLine);
+  splitLines(child.stderr, (l) => { lastErr = stripAnsi(l).trim(); onLine(l); });
+  waits.unshift(new Promise((resolve, reject) => {
+    child.on('error', (err) => reject(new Error(`Cannot run ${cmd}: ${err.message}`)));
+    child.on('close', (code, signal) => {
+      children.delete(child);
+      if (okCodes.includes(code)) return resolve(code);
+      const why = signal ? `was stopped by ${signal}` : `failed with exit code ${code}`;
+      return reject(new Error(`${cmd} ${why}${lastErr ? `: ${lastErr.slice(0, 300)}` : ''}`));
+    });
+  }));
+  return Promise.all(waits).then(([code]) => code, (err) => { child.kill('SIGTERM'); throw err; });
+}
+
+function capture(cmd, args) {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * MiB, timeout: 120_000 });
+  if (r.error) throw new Error(`Cannot run ${cmd}: ${r.error.message}`);
+  if (r.status !== 0) {
+    const why = (r.stderr || '').trim().split('\n').pop() || `exit code ${r.status}`;
+    throw new Error(`${cmd} ${args[0]} failed: ${why}`);
+  }
+  return r.stdout;
+}
+
+const hashingStream = (state) => new Transform({
+  transform(chunk, _enc, cb) { state.hash.update(chunk); state.size += chunk.length; cb(null, chunk); },
+});
+
+function sha256File(file) {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha256');
+    fs.createReadStream(file).on('error', reject).on('data', (c) => h.update(c)).on('end', () => resolve(h.digest('hex')));
+  });
+}
+
+// Command stdout -> (gzip) -> file, hashing the bytes as they are written
+async function streamToFile(cmd, args, file, log, { gzip = false } = {}) {
+  const raw = { hash: crypto.createHash('sha256'), size: 0 };
+  const written = { hash: crypto.createHash('sha256'), size: 0 };
+  const chain = [hashingStream(raw)];
+  if (gzip) chain.push(zlib.createGzip({ level: 6 }));
+  chain.push(hashingStream(written), fs.createWriteStream(file, { flags: 'wx', mode: 0o640 }));
+  await exec(cmd, args, { onLine: (l) => log(`  ${l}`), pipeTo: chain });
+  return { size: written.size, raw: raw.size, sha256: written.hash.digest('hex') };
+}
+
+async function copyHashed(src, dst) {
+  const st = { hash: crypto.createHash('sha256'), size: 0 };
+  await pipeline(fs.createReadStream(src), hashingStream(st), fs.createWriteStream(dst, { flags: 'wx', mode: 0o640 }));
+  return { size: st.size, sha256: st.hash.digest('hex') };
+}
+
+// ---------- backup disk ----------
+// Rule 1: never write anywhere unless /mnt/backup is its own mounted filesystem on another device than /
+function checkDisk({ needMarker = true } = {}) {
+  const r = spawnSync('findmnt', ['-J', '-n', '-o', 'TARGET,SOURCE,FSTYPE,UUID', '--mountpoint', BACKUP_ROOT], { encoding: 'utf8' });
+  if (r.error) throw new Error(`Cannot run findmnt: ${r.error.message}`);
+  let info = null;
+  try { info = JSON.parse(r.stdout).filesystems?.[0] || null; } catch { /* not mounted: empty output */ }
+  if (r.status !== 0 || !info || info.target !== BACKUP_ROOT) {
+    throw new Error(`The backup disk is not mounted at ${BACKUP_ROOT}. Mount the HDD (sudo mount ${BACKUP_ROOT}) and try again.`);
+  }
+  if (fs.statSync(BACKUP_ROOT).dev === fs.statSync('/').dev) {
+    throw new Error(`${BACKUP_ROOT} is on the same device as / (the SSD). Refusing to write backups there.`);
+  }
+  let marker = null;
+  try { marker = fs.readFileSync(path.join(BACKUP_ROOT, MARKER), 'utf8').trim(); } catch { /* checked below */ }
+  if (needMarker && !marker) {
+    throw new Error(`${BACKUP_ROOT}/${MARKER} is missing. If this is the right backup disk, run: sudo panel-backup init-disk`);
+  }
+  return { source: info.source, fstype: info.fstype, uuid: info.uuid, marker };
+}
+
+// Re-checked before every target and before renames, so a disk that drops off mid-job never makes us
+// write into the empty mountpoint folder on the SSD
+function assertDisk(ctx) {
+  const d = checkDisk();
+  if (d.marker !== ctx.disk.marker) throw new Error('A different disk is now mounted at /mnt/backup. Stopping.');
+}
+
+function space(dir) {
+  const s = fs.statfsSync(dir);
+  return { total: s.blocks * s.bsize, free: s.bavail * s.bsize, used: (s.blocks - s.bfree) * s.bsize };
+}
+
+const syncDisk = () => spawnSync('sync', ['-f', BACKUP_ROOT]);
+
+function rmSafe(p) {
+  const abs = path.resolve(p);
+  if (!abs.startsWith(`${BACKUP_ROOT}/`) || abs.split('/').length < 4) throw new Error(`Refusing to delete ${abs}`);
+  fs.rmSync(abs, { recursive: true, force: true });
+}
+
+function readdirSafe(dir) {
+  try { return fs.readdirSync(dir); } catch { return []; }
+}
+
+// ---------- runs on the disk ----------
+// A run is good only when runs/<id>/manifest.json exists with status "success": it is written last
+function readManifest(id) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(BACKUP_ROOT, 'runs', id, 'manifest.json'), 'utf8'));
+    return m && m.id === id && m.status === 'success' ? m : null;
+  } catch {
+    return null;
+  }
+}
+
+function scanRuns() {
+  const known = new Set(); // every finished run folder, even with an unreadable manifest (never auto-deleted)
+  const good = [];
+  for (const e of readdirSafe(path.join(BACKUP_ROOT, 'runs'))) {
+    if (!ID_RE.test(e)) continue;
+    known.add(e);
+    const m = readManifest(e);
+    if (m) good.push(m);
+  }
+  good.sort((a, b) => (a.id < b.id ? -1 : 1));
+  return { known, good };
+}
+
+function requireGood(id) {
+  checkId(id);
+  const m = readManifest(id);
+  if (!m) throw new UsageError(`Backup ${id} was not found on the disk or did not finish`);
+  return m;
+}
+
+function safeJoin(base, rel) {
+  const abs = path.join(base, ...splitSafePath(rel));
+  if (!abs.startsWith(`${base}/`)) throw new Error(`Bad path in manifest: ${rel}`);
+  return abs;
+}
+
+// Resolves a path inside a snapshot without following symlinks anywhere along the way
+function resolveInSnapshot(base, rel) {
+  const parts = splitSafePath(rel);
+  let cur = base;
+  let st = fs.lstatSync(cur);
+  for (const p of parts) {
+    cur = path.join(cur, p);
+    try { st = fs.lstatSync(cur); } catch { throw new UsageError(`${parts.join('/')} does not exist in this backup`); }
+    if (st.isSymbolicLink()) throw new UsageError(`${parts.join('/')} is (or goes through) a symlink`);
+  }
+  return { abs: cur, rel: parts.join('/'), st };
+}
+
+// Leftovers of jobs that died: *.partial, and artifacts whose run never got a runs/<id> folder
+function cleanupStale(ctx) {
+  const { known } = scanRuns();
+  const victims = [];
+  for (const dir of ['host', 'databases', 'pm2', 'runs']) {
+    for (const e of readdirSafe(path.join(BACKUP_ROOT, dir))) {
+      if (e.endsWith('.partial') || (dir !== 'runs' && ID_RE.test(e) && !known.has(e))) victims.push(path.join(BACKUP_ROOT, dir, e));
+    }
+  }
+  for (const name of readdirSafe(path.join(BACKUP_ROOT, 'containers'))) {
+    for (const f of readdirSafe(path.join(BACKUP_ROOT, 'containers', name))) {
+      const m = /^(\d{8}-\d{6})\.tar\.gz$/.exec(f);
+      if (f.endsWith('.partial') || (m && !known.has(m[1]))) victims.push(path.join(BACKUP_ROOT, 'containers', name, f));
+    }
+  }
+  for (const v of victims) {
+    ctx.log(`${ctx.dryRun ? 'Would remove' : 'Removing'} leftover of an unfinished backup: ${path.relative(BACKUP_ROOT, v)}`);
+    if (!ctx.dryRun) rmSafe(v);
+  }
+}
+
+function deleteRun(id) {
+  if (!ID_RE.test(id)) throw new Error(`Bad backup id ${id}`);
+  rmSafe(path.join(BACKUP_ROOT, 'runs', id)); // first, so the run stops counting as good before its data goes
+  for (const dir of ['host', 'databases', 'pm2']) rmSafe(path.join(BACKUP_ROOT, dir, id));
+  for (const name of readdirSafe(path.join(BACKUP_ROOT, 'containers'))) {
+    rmSafe(path.join(BACKUP_ROOT, 'containers', name, `${id}.tar.gz`));
+  }
+}
+
+function pruneRuns(ctx, { extraId = null } = {}) {
+  const ids = scanRuns().good.map((m) => m.id);
+  if (extraId) ids.push(extraId);
+  const { daily, weekly, monthly } = ctx.config.retention;
+  const plan = planRetention(ids, ctx.config.retention);
+  const rule = `${daily} daily, ${weekly} weekly, ${monthly} monthly`;
+  if (!plan.remove.length) {
+    ctx.log(`Retention (${rule}): keeping all ${plan.keep.length} good backup(s)`);
+    return plan;
+  }
+  ctx.log(`Retention (${rule}): keeping ${plan.keep.length}, ${ctx.dryRun ? 'would remove' : 'removing'} ${plan.remove.length}: ${plan.remove.join(', ')}`);
+  if (!ctx.dryRun) {
+    for (const id of plan.remove) {
+      assertDisk(ctx);
+      deleteRun(id);
+    }
+  }
+  return plan;
+}
+
+// ---------- targets ----------
+function listContainers(ctx) {
+  if (ctx.containerNames) return ctx.containerNames;
+  const urls = JSON.parse(capture('lxc', ['query', '/1.0/instances']));
+  const names = [];
+  for (const u of urls) {
+    const name = decodeURIComponent(String(u).split('?')[0].split('/').pop());
+    if (!CT_RE.test(name)) ctx.log(`Skipping container "${name}": its name has characters the helper does not accept`);
+    else if (ctx.config.containerExclude.includes(name)) ctx.log(`Skipping container ${name} (excluded in settings)`);
+    else names.push(name);
+  }
+  ctx.containerNames = names.sort();
+  return ctx.containerNames;
+}
+
+function hostSources(ctx) {
+  if (ctx.hostSources) return ctx.hostSources;
+  ctx.hostSources = ctx.config.hostPaths.filter((p) => {
+    try { fs.lstatSync(p); return true; } catch { ctx.log(`Skipping host path ${p}: it does not exist`); return false; }
+  });
+  if (!ctx.hostSources.length) throw new Error('None of the configured host paths exist');
+  return ctx.hostSources;
+}
+
+function linkDestFor(prev) {
+  if (!prev?.host) return null;
+  const dir = path.join(BACKUP_ROOT, 'host', prev.id);
+  return fs.existsSync(dir) ? dir : null;
+}
+
+function detectDatabases(ctx) {
+  let raw;
+  try {
+    raw = capture('docker', ['ps', '--no-trunc', '--format', '{{json .}}']);
+  } catch (err) {
+    if (/Cannot run docker: .*ENOENT/.test(err.message)) {
+      ctx.log('Docker is not installed: no databases to dump');
+      return [];
+    }
+    throw err;
+  }
+  const dbs = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    const c = JSON.parse(line);
+    const kind = dbKind(c.Image);
+    if (!kind || !/^[0-9a-f]{12,64}$/.test(c.ID)) continue;
+    const first = String(c.Names || '').split(',')[0];
+    dbs.push({ id: c.ID, name: DOCKER_NAME_RE.test(first) ? first : c.ID.slice(0, 12), kind, image: c.Image });
+  }
+  return dbs;
+}
+
+async function checkSpace(ctx, prev) {
+  ctx.progress(0, 'Estimating size');
+  const est = { containers: 0, largest: 0, databases: 0, pm2: 0, host: 0 };
+  if (ctx.targets.includes('containers')) {
+    for (const n of listContainers(ctx)) {
+      const last = prev?.sizes?.containers?.[n];
+      let usage = 0;
+      try { usage = JSON.parse(capture('lxc', ['query', `/1.0/instances/${n}/state`])).disk?.root?.usage || 0; } catch { /* unknown */ }
+      const e = last ? Math.ceil(last * 1.1) : usage || 2 * GiB;
+      est.containers += e;
+      est.largest = Math.max(est.largest, usage || e);
+      ctx.log(`  container ${n}: about ${fmtBytes(e)} (${last ? 'last export + 10%' : usage ? 'disk usage before compression' : 'guess'})`);
+    }
+  }
+  if (ctx.targets.includes('databases')) est.databases = prev?.sizes?.databases ? Math.ceil(prev.sizes.databases * 1.2) : 256 * MiB;
+  if (ctx.targets.includes('pm2')) est.pm2 = MiB;
+  if (ctx.targets.includes('host')) {
+    const linkDest = linkDestFor(prev);
+    const args = [...rsyncArgs(ctx.config, { linkDest, dryRun: true }), ...hostSources(ctx), path.join(BACKUP_ROOT, 'host', `${ctx.id}.partial`) + '/'];
+    if (ctx.dryRun) ctx.log(`Estimating host files: ${fmtCmd('rsync', args)}`);
+    let stats = '';
+    await exec('rsync', args, {
+      okCodes: [0, 23, 24],
+      onLine: (l) => { stats += `${l}\n`; if (ctx.dryRun) ctx.log(`  ${l}`); },
+    });
+    const m = /Total transferred file size: ([\d,.]+)/.exec(stats);
+    est.host = m ? Number(m[1].replace(/[,.]/g, '')) : 0;
+    ctx.log(`  host files: about ${fmtBytes(est.host)} new or changed${linkDest ? ` since ${prev.id}` : ''}`);
+  }
+
+  const total = est.containers + est.databases + est.pm2 + est.host;
+  const disk = space(BACKUP_ROOT);
+  ctx.log(`Estimated size ${fmtBytes(total)}, free on backup disk ${fmtBytes(disk.free)} of ${fmtBytes(disk.total)}`);
+  if (total > disk.free * SPACE_MARGIN) {
+    throw new Error(`Not enough space on the backup disk: this backup needs about ${fmtBytes(total)} but only ${fmtBytes(disk.free)} is free `
+      + '(keeping a 10% margin). Free some space or keep fewer backups.');
+  }
+  if (est.largest && fs.existsSync(LXD_BACKUPS_DIR)) {
+    const tmp = space(LXD_BACKUPS_DIR);
+    if (est.largest > tmp.free * SPACE_MARGIN) {
+      throw new Error(`LXD builds each export in ${LXD_BACKUPS_DIR} before it is copied to the backup disk, and only `
+        + `${fmtBytes(tmp.free)} is free there for a container of about ${fmtBytes(est.largest)}. See "storage.backups_volume" in README.md.`);
+    }
+  }
+  return est;
+}
+
+async function backupPm2(ctx) {
+  const user = ctx.config.pm2User;
+  const home = capture('getent', ['passwd', user]).trim().split(':')[5];
+  if (!home || !path.isAbsolute(home)) throw new Error(`Cannot find the home folder of ${user}`);
+  const bin = ['/usr/local/bin/pm2', '/usr/bin/pm2'].find((p) => fs.existsSync(p));
+  const args = bin
+    ? ['-u', user, '--', 'env', `HOME=${home}`, `PM2_HOME=${home}/.pm2`, bin, 'save', '--force']
+    : ['-l', user, '-c', 'pm2 save --force'];
+  const dump = path.join(home, '.pm2', 'dump.pm2');
+  const final = path.join(BACKUP_ROOT, 'pm2', ctx.id);
+  const partial = `${final}.partial`;
+  if (ctx.dryRun) {
+    ctx.log(`Would run: ${fmtCmd('runuser', args)}`);
+    ctx.log(`Would copy ${dump} to ${final}/dump.pm2`);
+    return;
+  }
+  ctx.progress(0, 'Saving the PM2 process list');
+  await exec('runuser', args, { onLine: (l) => ctx.log(`  ${l}`) });
+  const st = fs.lstatSync(dump);
+  if (!st.isFile()) throw new Error(`${dump} is not a regular file`);
+  fs.mkdirSync(partial, { recursive: true });
+  ctx.partials.push(partial);
+  const { size, sha256 } = await copyHashed(dump, path.join(partial, 'dump.pm2'));
+  ctx.artifacts.push({ kind: 'pm2', path: `pm2/${ctx.id}/dump.pm2`, size, sha256 });
+  ctx.renames.push([partial, final]);
+  ctx.sizes.pm2 = size;
+  ctx.size += size;
+  ctx.log(`PM2 process list saved (${fmtBytes(size)})`);
+}
+
+async function backupDatabases(ctx) {
+  const dbs = detectDatabases(ctx);
+  if (!dbs.length) {
+    ctx.log('No Postgres, MySQL/MariaDB or MongoDB containers are running in Docker');
+    return;
+  }
+  const final = path.join(BACKUP_ROOT, 'databases', ctx.id);
+  const partial = `${final}.partial`;
+  for (const [i, db] of dbs.entries()) {
+    const { ext, script } = DUMPS[db.kind];
+    const file = `${db.name}-${db.kind}.${ext}.gz`;
+    const args = ['exec', db.id, 'sh', '-c', script];
+    if (ctx.dryRun) {
+      ctx.log(`Would run: ${fmtCmd('docker', ['exec', db.name, 'sh', '-c', script])} | gzip > ${final}/${file}`);
+      continue;
+    }
+    if (i === 0) {
+      fs.mkdirSync(partial, { recursive: true });
+      ctx.partials.push(partial);
+    }
+    ctx.progress(i / dbs.length, `Dumping ${db.kind} in ${db.name}`);
+    ctx.log(`Dumping ${db.kind} database container ${db.name} (${db.image})`);
+    const r = await streamToFile('docker', args, path.join(partial, file), ctx.log, { gzip: true });
+    if (!r.raw) throw new Error(`The dump of ${db.name} was empty`);
+    ctx.artifacts.push({ kind: 'database', name: db.name, path: `databases/${ctx.id}/${file}`, size: r.size, sha256: r.sha256 });
+    ctx.databases.push({ file, container: db.name, kind: db.kind });
+    ctx.sizes.databases += r.size;
+    ctx.size += r.size;
+    ctx.log(`  ${file}: ${fmtBytes(r.size)} (${fmtBytes(r.raw)} before gzip)`);
+  }
+  if (!ctx.dryRun) ctx.renames.push([partial, final]);
+}
+
+async function backupContainers(ctx) {
+  const names = listContainers(ctx);
+  if (!names.length) ctx.log('No LXD containers to export');
+  for (const [i, name] of names.entries()) {
+    const dir = path.join(BACKUP_ROOT, 'containers', name);
+    const final = path.join(dir, `${ctx.id}.tar.gz`);
+    const partial = `${final}.partial`;
+    const args = ['export', name, partial, '--instance-only', '--compression=gzip'];
+    if (ctx.config.optimizedStorage) args.push('--optimized-storage');
+    if (ctx.dryRun) {
+      ctx.log(`Would run: ${fmtCmd('lxc', args)}`);
+      continue;
+    }
+    assertDisk(ctx);
+    ctx.progress(i / names.length, `Exporting container ${name} (${i + 1} of ${names.length})`);
+    ctx.log(`Exporting container ${name}`);
+    fs.mkdirSync(dir, { recursive: true });
+    ctx.partials.push(partial);
+    // lxc prints progress with \r; keep it out of the log
+    await exec('lxc', args, { onLine: (l) => { if (!/\d+(\.\d+)?\s*[KMGT]?i?B\b|%/.test(l)) ctx.log(`  ${l}`); } });
+    const size = fs.statSync(partial).size;
+    ctx.progress((i + 0.9) / names.length, `Checksumming container ${name}`);
+    const sha256 = await sha256File(partial); // reads it back from the HDD, which also proves it is readable
+    ctx.artifacts.push({ kind: 'container', name, path: `containers/${name}/${ctx.id}.tar.gz`, size, sha256 });
+    ctx.renames.push([partial, final]);
+    ctx.containers.push(name);
+    ctx.sizes.containers[name] = size;
+    ctx.size += size;
+    ctx.log(`  ${name}: ${fmtBytes(size)}`);
+  }
+}
+
+async function* walk(root, rel = '') {
+  const dir = await fs.promises.opendir(rel ? path.join(root, rel) : root);
+  for await (const d of dir) {
+    const r = rel ? `${rel}/${d.name}` : d.name;
+    if (d.isDirectory()) yield* walk(root, r);
+    else if (d.isFile()) yield r;
+  }
+}
+
+async function* checksumEntries(m) {
+  const input = fs.createReadStream(path.join(BACKUP_ROOT, m.host.checksums)).pipe(zlib.createGunzip());
+  for await (const line of readline.createInterface({ input, crlfDelay: Infinity })) {
+    if (line) yield JSON.parse(line);
+  }
+}
+
+// sha256 of every file in the snapshot. Files rsync hard-linked to the previous snapshot are unchanged
+// (same inode), so their hash is copied from the previous list instead of reading them again.
+async function hashHost(ctx, dir, prev) {
+  const prevSums = new Map();
+  const prevDir = prev ? path.join(BACKUP_ROOT, 'host', prev.id) : null;
+  if (prev?.host?.checksums) {
+    try { for await (const e of checksumEntries(prev)) prevSums.set(e.p, e.h); } catch (err) {
+      ctx.log(`Could not read the previous checksum list (${err.message}); hashing everything`);
+      prevSums.clear();
+    }
+  }
+  const listFile = path.join(ctx.runsPartial, 'host.sha256.jsonl.gz');
+  const gz = zlib.createGzip();
+  const done = pipeline(gz, fs.createWriteStream(listFile, { mode: 0o640 }));
+  let files = 0;
+  let bytes = 0;
+  let fresh = 0;
+  for await (const rel of walk(dir)) {
+    const st = fs.lstatSync(path.join(dir, rel));
+    let h = null;
+    if (prevSums.has(rel)) {
+      try {
+        const old = fs.lstatSync(path.join(prevDir, rel));
+        if (old.ino === st.ino && old.dev === st.dev) h = prevSums.get(rel);
+      } catch { /* not in the previous snapshot */ }
+    }
+    if (!h) {
+      h = await sha256File(path.join(dir, rel));
+      fresh += st.size;
+    }
+    files += 1;
+    bytes += st.size;
+    if (!gz.write(`${JSON.stringify({ p: rel, h, s: st.size })}\n`)) await new Promise((r) => gz.once('drain', r));
+    if (files % 2000 === 0) ctx.progress(0.85, `Checksumming host files (${files.toLocaleString('en')} so far)`);
+  }
+  gz.end();
+  await done;
+  const sha256 = await sha256File(listFile);
+  const size = fs.statSync(listFile).size;
+  return { files, bytes, newBytes: fresh, list: { kind: 'checksums', path: `runs/${ctx.id}/host.sha256.jsonl.gz`, size, sha256 } };
+}
+
+async function backupHost(ctx, prev) {
+  const sources = hostSources(ctx);
+  const linkDest = linkDestFor(prev);
+  const final = path.join(BACKUP_ROOT, 'host', ctx.id);
+  const partial = `${final}.partial`;
+  const args = [...rsyncArgs(ctx.config, { linkDest }), ...sources, `${partial}/`];
+  if (ctx.dryRun) {
+    ctx.log(`Would run: ${fmtCmd('rsync', args)}`);
+    return;
+  }
+  fs.mkdirSync(partial, { recursive: true });
+  ctx.partials.push(partial);
+  ctx.progress(0, 'Copying host files');
+  ctx.log(`Copying host files: ${sources.join(', ')}${linkDest ? ` (unchanged files hard-linked to ${prev.id})` : ''}`);
+  const code = await exec('rsync', args, {
+    okCodes: [0, 24],
+    onLine: (l) => {
+      const m = PROGRESS_RE.exec(l);
+      if (m) ctx.progress((Math.min(100, Number(m[1])) / 100) * 0.8, `Copying host files (${m[1]}%)`);
+      else ctx.log(`  ${l}`);
+    },
+  });
+  if (code === 24) ctx.log('Note: some files disappeared while copying (normal on a live server)');
+  assertDisk(ctx);
+  ctx.progress(0.8, 'Checksumming host files');
+  const h = await hashHost(ctx, partial, linkDest ? prev : null);
+  ctx.artifacts.push(h.list);
+  ctx.renames.push([partial, final]);
+  ctx.host = { dir: `host/${ctx.id}`, paths: sources, files: h.files, bytes: h.bytes, newBytes: h.newBytes, checksums: h.list.path };
+  ctx.sizes.hostNew = h.newBytes;
+  ctx.size += h.newBytes + h.list.size;
+  ctx.log(`Host files: ${h.files.toLocaleString('en')} files, ${fmtBytes(h.bytes)} in the snapshot, ${fmtBytes(h.newBytes)} new`);
+}
+
+const STEPS = { pm2: backupPm2, databases: backupDatabases, containers: backupContainers, host: backupHost };
+
+function finalize(ctx) {
+  assertDisk(ctx);
+  for (const [from, to] of ctx.renames) fs.renameSync(from, to);
+  syncDisk();
+  const manifest = {
+    version: 1,
+    id: ctx.id,
+    status: 'success',
+    trigger: ctx.trigger,
+    by: ctx.by,
+    startedAt: ctx.job.startedAt,
+    finishedAt: Date.now(),
+    targets: ctx.targets,
+    optimizedStorage: ctx.config.optimizedStorage,
+    excludes: ctx.config.excludes,
+    containers: ctx.containers,
+    databases: ctx.databases,
+    host: ctx.host,
+    sizes: ctx.sizes,
+    size: ctx.size,
+    artifacts: ctx.artifacts,
+  };
+  fs.writeFileSync(path.join(ctx.runsPartial, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o640 });
+  syncDisk();
+  fs.renameSync(ctx.runsPartial, path.join(BACKUP_ROOT, 'runs', ctx.id)); // from here on the run counts as good
+  syncDisk();
+}
+
+// ---------- commands ----------
+function saveJob(job) {
+  writeAtomic(path.join(JOBS_DIR, `${job.id}.json`), JSON.stringify(job), 0o640);
+}
+
+// Set only by panel-backup.service. sudo resets the environment, so the panel cannot fake it.
+const fromService = () => process.env.PANEL_BACKUP_SERVICE === '1';
+
+function takeRequest() {
+  if (!fromService()) return null; // only the systemd service picks up "Backup now" requests
+  try {
+    const r = JSON.parse(fs.readFileSync(REQUEST_FILE, 'utf8'));
+    fs.rmSync(REQUEST_FILE, { force: true });
+    if (!(Date.now() - r.at < 120_000) || !USER_RE.test(r.by || '') || !ID_RE.test(r.id || '')) return null;
+    return { id: r.id, by: r.by, targets: Array.isArray(r.targets) ? r.targets : undefined };
+  } catch {
+    return null;
+  }
+}
+
+async function cmdRun(_pos, opts) {
+  const config = loadConfig();
+  const dryRun = !!opts.dryRun;
+  const req = dryRun ? null : takeRequest();
+  const targets = pickTargets(opts.targets || req?.targets, config);
+  const id = req?.id || makeId(new Date(), config.schedule.timezone);
+  const trigger = req ? 'manual' : fromService() ? 'timer' : 'cli';
+  const sudoUser = USER_RE.test(process.env.SUDO_USER || '') ? process.env.SUDO_USER : 'root';
+  const by = req ? req.by : trigger === 'timer' ? 'system' : sudoUser;
+
+  let job = null;
+  if (!dryRun) {
+    fs.mkdirSync(JOBS_DIR, { recursive: true });
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+    job = {
+      id, trigger, by, targets, status: 'running', phase: 'Starting', progress: 0, startedAt: Date.now(), finishedAt: null,
+      size: 0, error: null, warning: null, log: path.join(LOGS_DIR, `${id}.log`), pid: process.pid,
+    };
+    saveJob(job);
+  }
+  const log = makeLogger(job ? job.log : null);
+  let lastSave = 0;
+  const ctx = {
+    id, config, targets, dryRun, log, job, trigger, by, disk: null, stepIndex: 0, totalSteps: 1,
+    renames: [], partials: [], artifacts: [], containers: [], databases: [], host: null, size: 0,
+    sizes: { containers: {}, databases: 0, pm2: 0, hostNew: 0 },
+    progress(frac, phase) {
+      if (!job) return;
+      job.phase = phase;
+      job.progress = Math.min(99, Math.round(((ctx.stepIndex + frac) / ctx.totalSteps) * 100));
+      if (Date.now() - lastSave > 1000) { lastSave = Date.now(); saveJob(job); }
+    },
+  };
+  process.on('SIGTERM', () => { stopping = true; for (const c of children) c.kill('SIGTERM'); });
+
+  log(`${dryRun ? 'DRY RUN (nothing is written). ' : ''}Backup ${id}, ${trigger}${by ? ` by ${by}` : ''}, targets: ${targets.join(', ')}`);
+  if (dryRun && process.getuid() !== 0) log('Not running as root: the estimate below may be incomplete');
+  try {
+    ctx.progress(0, 'Checking the backup disk');
+    ctx.disk = checkDisk();
+    const d = space(BACKUP_ROOT);
+    log(`Backup disk OK: ${ctx.disk.source} (${ctx.disk.fstype}) at ${BACKUP_ROOT}, ${fmtBytes(d.free)} free of ${fmtBytes(d.total)}`);
+    cleanupStale(ctx);
+    const prev = scanRuns().good.at(-1) || null;
+    log(prev ? `Previous good backup: ${prev.id}` : 'No previous good backup: host files are copied in full this time');
+    await checkSpace(ctx, prev);
+
+    if (!dryRun) {
+      ctx.runsPartial = path.join(BACKUP_ROOT, 'runs', `${id}.partial`);
+      fs.mkdirSync(ctx.runsPartial, { recursive: true });
+      ctx.partials.push(ctx.runsPartial);
+    }
+    const steps = ORDER.filter((t) => targets.includes(t));
+    ctx.totalSteps = steps.length + 1;
+    for (const [i, t] of steps.entries()) {
+      ctx.stepIndex = i;
+      assertDisk(ctx);
+      await STEPS[t](ctx, prev);
+    }
+    if (dryRun) {
+      pruneRuns(ctx, { extraId: id });
+      log('Dry run finished. Nothing was written.');
+      result({ id, dryRun: true });
+      return;
+    }
+
+    ctx.stepIndex = steps.length;
+    ctx.progress(0.5, 'Writing the manifest');
+    finalize(ctx);
+    ctx.partials = [];
+    try {
+      pruneRuns(ctx);
+    } catch (err) {
+      job.warning = `Backup is good, but removing old backups failed: ${err.message}`;
+      log(job.warning);
+    }
+    Object.assign(job, { status: 'success', phase: 'Done', progress: 100, finishedAt: Date.now(), size: ctx.size });
+    saveJob(job);
+    log(`Backup ${id} finished: ${fmtBytes(ctx.size)} of new data in ${Math.round((job.finishedAt - job.startedAt) / 1000)}s`);
+    result({ id, status: 'success' });
+  } catch (err) {
+    const msg = stopping ? 'The backup was stopped before it finished' : err.message;
+    log(`${dryRun ? 'Would abort' : 'FAILED'}: ${msg}`);
+    if (job) {
+      if (ctx.partials.length) {
+        try {
+          assertDisk(ctx); // only clean up on the real disk
+          for (const p of ctx.partials) rmSafe(p);
+          log('Removed the unfinished files of this backup');
+        } catch (e) {
+          log(`Unfinished files were left for the next run to clean up (${e.message})`);
+        }
+      }
+      Object.assign(job, { status: 'failed', finishedAt: Date.now(), error: msg });
+      saveJob(job);
+    }
+    throw new Error(msg);
+  }
+}
+
+function isBusy() {
+  const s = spawnSync('systemctl', ['is-active', SERVICE], { encoding: 'utf8' }).stdout.trim();
+  if (['active', 'activating', 'deactivating', 'reloading'].includes(s)) return true;
+  fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
+  return spawnSync('flock', ['-n', LOCK_FILE, 'true']).status !== 0;
+}
+
+function cmdStart(_pos, opts) {
+  const config = loadConfig();
+  const targets = pickTargets(opts.targets, config);
+  if (isBusy()) {
+    process.stderr.write('@@ERROR A backup job is already running\n');
+    process.exitCode = EXIT_BUSY;
+    return;
+  }
+  checkDisk(); // fail right away instead of starting a job that cannot run
+  const id = makeId(new Date(), config.schedule.timezone);
+  fs.mkdirSync(path.dirname(REQUEST_FILE), { recursive: true, mode: 0o700 });
+  writeAtomic(REQUEST_FILE, JSON.stringify({ id, by: opts.by || 'root', targets, at: Date.now() }), 0o600);
+  try {
+    capture('systemctl', ['start', '--no-block', SERVICE]);
+  } catch (err) {
+    fs.rmSync(REQUEST_FILE, { force: true }); // or the next timer run would pick it up as this request
+    throw err;
+  }
+  result({ id, targets });
+}
+
+function loadConfig() {
+  let raw;
+  try {
+    raw = fs.readFileSync(CONFIG_PATH, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return structuredClone(DEFAULTS);
+    throw err;
+  }
+  try {
+    return normalizeConfig(JSON.parse(raw));
+  } catch (err) {
+    throw new Error(`${CONFIG_PATH} is invalid: ${err.message}`);
+  }
+}
+
+function cmdSetConfig() {
+  const raw = fs.readFileSync(0, 'utf8');
+  if (raw.length > 65536) throw new UsageError('Settings are too large');
+  let input;
+  try { input = JSON.parse(raw); } catch { throw new UsageError('Settings must be valid JSON'); }
+  const config = normalizeConfig(input);
+  const cal = onCalendar(config.schedule);
+  if (spawnSync('systemd-analyze', ['calendar', cal]).status !== 0) throw new UsageError(`systemd does not accept the schedule "${cal}"`);
+  // Timer first: if that fails, the saved settings still match what systemd runs
+  writeAtomic(TIMER_DROPIN, `# Written by panel-backup set-config. Change the schedule in the panel instead.\n[Timer]\nOnCalendar=\nOnCalendar=${cal}\n`, 0o644);
+  writeAtomic(CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, 0o644);
+  capture('systemctl', ['daemon-reload']);
+  if (config.schedule.enabled) {
+    capture('systemctl', ['enable', TIMER]);
+    capture('systemctl', ['restart', TIMER]);
+  } else {
+    capture('systemctl', ['disable', '--now', TIMER]);
+  }
+  result({ config });
+}
+
+function smartInfo(device) {
+  const r = spawnSync('smartctl', ['-j', '-H', '-A', '-i', device], { encoding: 'utf8', timeout: 20_000 });
+  if (r.error) return { health: 'unknown', note: 'smartctl is not installed (sudo apt install smartmontools)' };
+  let j;
+  try { j = JSON.parse(r.stdout); } catch { return { health: 'unknown', note: 'smartctl gave no readable answer' }; }
+  const passed = j.smart_status?.passed;
+  return {
+    health: passed === true ? 'PASSED' : passed === false ? 'FAILED' : 'unknown',
+    model: j.model_name || null,
+    temperature: j.temperature?.current ?? null,
+    powerOnHours: j.power_on_time?.hours ?? null,
+    note: passed === undefined ? (j.smartctl?.messages?.[0]?.string || 'SMART status not available') : null,
+  };
+}
+
+function cmdDiskStatus() {
+  const s = {
+    mountpoint: BACKUP_ROOT, mounted: false, ready: false, source: null, fstype: null, device: null,
+    total: null, used: null, free: null, smart: { health: 'unknown' }, lxdTempFree: null, error: null,
+  };
+  try {
+    const d = checkDisk({ needMarker: false });
+    Object.assign(s, { mounted: true, source: d.source, fstype: d.fstype, ...space(BACKUP_ROOT) });
+    s.ready = !!d.marker;
+    if (!d.marker) s.error = `Disk is mounted but not initialised. Run: sudo panel-backup init-disk`;
+    let dev = d.source;
+    const pk = spawnSync('lsblk', ['-no', 'PKNAME', d.source], { encoding: 'utf8' }).stdout?.trim();
+    if (pk && /^[A-Za-z0-9_-]+$/.test(pk)) dev = `/dev/${pk}`;
+    s.device = dev;
+    if (/^\/dev\/[A-Za-z0-9/_-]+$/.test(dev)) s.smart = smartInfo(dev);
+  } catch (err) {
+    s.error = err.message;
+  }
+  try { if (fs.existsSync(LXD_BACKUPS_DIR)) s.lxdTempFree = space(LXD_BACKUPS_DIR).free; } catch { /* ignore */ }
+  result(s);
+}
+
+function cmdList() {
+  checkDisk();
+  result({
+    runs: scanRuns().good.reverse().map((m) => ({
+      id: m.id, startedAt: m.startedAt, finishedAt: m.finishedAt, trigger: m.trigger, by: m.by, targets: m.targets, size: m.size,
+      containers: m.containers || [], databases: m.databases || [], hostPaths: m.host?.paths || [], hostFiles: m.host?.files || 0,
+    })),
+  });
+}
+
+function snapshotBase(id) {
+  const m = requireGood(id);
+  if (!m.host) throw new UsageError(`Backup ${id} has no host files`);
+  return path.join(BACKUP_ROOT, ...splitSafePath(m.host.dir));
+}
+
+function cmdLs([id, rel = '']) {
+  checkDisk();
+  const { abs, rel: clean, st } = resolveInSnapshot(snapshotBase(id), rel);
+  if (!st.isDirectory()) throw new UsageError(`${clean} is not a folder`);
+  const dirents = fs.readdirSync(abs, { withFileTypes: true });
+  const type = (d) => (d.isDirectory() ? 'dir' : d.isFile() ? 'file' : d.isSymbolicLink() ? 'link' : 'other');
+  const entries = dirents.slice(0, LS_MAX).map((d) => {
+    let s = null;
+    try { s = fs.lstatSync(path.join(abs, d.name)); } catch { /* vanished */ }
+    return { name: d.name, type: type(d), size: s?.size ?? 0, mtime: s ? Math.round(s.mtimeMs) : null };
+  }).sort((a, b) => (b.type === 'dir') - (a.type === 'dir') || a.name.localeCompare(b.name));
+  result({ id, path: clean, entries, truncated: dirents.length > LS_MAX });
+}
+
+// Streams a file or folder from a snapshot to stdout as .tar.gz
+function cmdDownload([id, rel]) {
+  checkDisk();
+  const { abs, rel: clean, st } = resolveInSnapshot(snapshotBase(id), rel);
+  if (!clean) throw new UsageError('Pick a file or folder to download');
+  if (!st.isFile() && !st.isDirectory()) throw new UsageError('Only files and folders can be downloaded');
+  return new Promise((resolve, reject) => {
+    const child = spawn('tar', ['-czf', '-', '-C', path.dirname(abs), '--', path.basename(abs)], { stdio: ['ignore', 'inherit', 'inherit'] });
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 || code === 1 ? resolve() : reject(new Error(`tar failed with exit code ${code}`))));
+  });
+}
+
+async function cmdDbDownload([id, file]) {
+  checkDisk();
+  const m = requireGood(id);
+  if (typeof file !== 'string' || !DB_FILE_RE.test(file) || !(m.databases || []).some((d) => d.file === file)) {
+    throw new UsageError('No such database dump in this backup');
+  }
+  const abs = path.join(BACKUP_ROOT, 'databases', id, file);
+  if (!fs.lstatSync(abs).isFile()) throw new UsageError('The dump is not a regular file');
+  await pipeline(fs.createReadStream(abs), process.stdout);
+}
+
+async function cmdVerify([id]) {
+  checkDisk();
+  const m = requireGood(id);
+  const failures = [];
+  let checked = 0;
+  const bad = (p, why) => { failures.push(`${p}: ${why}`); out(`BAD  ${p}: ${why}`); };
+  out(`Verifying backup ${id}: ${m.artifacts.length} archive(s)${m.host ? ` and ${m.host.files.toLocaleString('en')} host files` : ''}`);
+  for (const a of m.artifacts) {
+    checked += 1;
+    try {
+      const abs = safeJoin(BACKUP_ROOT, a.path);
+      const st = fs.statSync(abs);
+      if (st.size !== a.size) { bad(a.path, `size is ${st.size}, expected ${a.size}`); continue; }
+      if ((await sha256File(abs)) !== a.sha256) bad(a.path, 'checksum does not match');
+      else out(`OK   ${a.path} (${fmtBytes(a.size)})`);
+    } catch (err) {
+      bad(a.path, err.code === 'ENOENT' ? 'missing' : err.message);
+    }
+  }
+  if (m.host && !failures.some((f) => f.startsWith(m.host.checksums))) {
+    const base = path.join(BACKUP_ROOT, ...splitSafePath(m.host.dir));
+    let n = 0;
+    for await (const e of checksumEntries(m)) {
+      n += 1;
+      try {
+        const abs = safeJoin(base, e.p);
+        if ((await sha256File(abs)) !== e.h) bad(`host/${id}/${e.p}`, 'checksum does not match');
+      } catch (err) {
+        bad(`host/${id}/${e.p}`, err.code === 'ENOENT' ? 'missing' : err.message);
+      }
+      if (n % 2000 === 0) out(`...  ${n.toLocaleString('en')} of ${m.host.files.toLocaleString('en')} host files checked`);
+    }
+    if (n !== m.host.files) bad(m.host.checksums, `lists ${n} files, the manifest says ${m.host.files}`);
+    checked += n;
+    out(`Host files: ${n.toLocaleString('en')} checked`);
+  }
+  out(failures.length ? `FAILED: ${failures.length} problem(s) found` : `All ${checked.toLocaleString('en')} files match their checksums`);
+  result({ id, ok: !failures.length, checked, failureCount: failures.length, failures: failures.slice(0, 100) });
+}
+
+function checkId(id) {
+  if (typeof id !== 'string' || !ID_RE.test(id)) throw new UsageError('Invalid backup id');
+  return id;
+}
+
+function checkNewName(name) {
+  if (typeof name !== 'string' || !NEW_CT_RE.test(name)) {
+    throw new UsageError('New name: 2-63 lowercase letters, digits or dashes, starting with a letter, not ending with a dash');
+  }
+  return name;
+}
+
+const lxcExists = (name) => spawnSync('lxc', ['query', `/1.0/instances/${name}`], { stdio: 'ignore' }).status === 0;
+
+// Imports a container backup under a NEW name. Never touches an existing container, never starts it.
+async function cmdRestoreContainer([id, name, newName]) {
+  checkContainer(name);
+  checkNewName(newName);
+  checkDisk();
+  const m = requireGood(id);
+  const a = m.artifacts.find((x) => x.kind === 'container' && x.name === name);
+  if (!a) throw new UsageError(`Backup ${id} has no export of container ${name}`);
+  if (lxcExists(newName)) throw new UsageError(`A container named ${newName} already exists. Pick a new name.`);
+  const file = safeJoin(BACKUP_ROOT, a.path);
+  out(`Checking ${a.path} (${fmtBytes(a.size)}) against its checksum...`);
+  if ((await sha256File(file)) !== a.sha256) throw new Error('The backup file does not match its checksum. Not importing it.');
+  out(`Importing it as ${newName}...`);
+  await exec('lxc', ['import', file, newName], { onLine: (l) => { if (!/%|\d\s*[KMGT]?i?B\b/.test(l)) out(`  ${l}`); } });
+  const inst = JSON.parse(capture('lxc', ['query', `/1.0/instances/${newName}`]));
+  for (const key of Object.keys(inst.config || {})) {
+    if (/^volatile\.[A-Za-z0-9_-]+\.hwaddr$/.test(key)) await exec('lxc', ['config', 'unset', newName, key]); // new MAC addresses
+  }
+  await exec('lxc', ['config', 'set', newName, 'boot.autostart=false']);
+  const warnings = [];
+  for (const [dev, d] of Object.entries(inst.expanded_devices || {})) {
+    const ip = d['ipv4.address'] || d['ipv6.address'];
+    if (ip) warnings.push(`Device ${dev} has a fixed IP (${ip}). Change it before starting ${newName}, or it will clash with ${name}.`);
+  }
+  for (const w of warnings) out(`WARNING: ${w}`);
+  out(`Done. ${newName} was created and is stopped. Start it with: lxc start ${newName}`);
+  result({ id, from: name, name: newName, warnings });
+}
+
+function cmdPrune(_pos, opts) {
+  const ctx = { config: loadConfig(), dryRun: !!opts.dryRun, log: makeLogger(null), disk: checkDisk() };
+  const plan = pruneRuns(ctx);
+  result({ keep: plan.keep, remove: plan.remove, dryRun: ctx.dryRun });
+}
+
+function cmdInitDisk() {
+  const d = checkDisk({ needMarker: false });
+  const markerPath = path.join(BACKUP_ROOT, MARKER);
+  if (d.marker) {
+    out(`${d.source} is already the backup disk (id ${d.marker})`);
+  } else {
+    fs.writeFileSync(markerPath, `${crypto.randomUUID()}\n`, { mode: 0o600 });
+    out(`Marked ${d.source} (${d.fstype}) as the backup disk`);
+  }
+  fs.chmodSync(BACKUP_ROOT, 0o700); // backups contain copies of /etc/shadow, /root, ...
+  for (const dir of ['containers', 'host', 'databases', 'pm2', 'runs']) fs.mkdirSync(path.join(BACKUP_ROOT, dir), { recursive: true, mode: 0o700 });
+  result({ ok: true, source: d.source });
+}
+
+// ---------- entry ----------
+// `check` validates positional arguments before anything else happens (including the root check)
+const COMMANDS = {
+  run: { args: [0], opts: ['dryRun', 'targets'], lock: (o) => !o.dryRun, fn: cmdRun },
+  start: { args: [0], opts: ['targets', 'by'], fn: cmdStart },
+  'disk-status': { args: [0], fn: cmdDiskStatus },
+  'get-config': { args: [0], fn: () => result(loadConfig()) },
+  'set-config': { args: [0], fn: cmdSetConfig },
+  list: { args: [0], fn: cmdList },
+  ls: { args: [1, 2], check: ([id, p = '']) => { checkId(id); splitSafePath(p); }, fn: cmdLs },
+  download: { args: [2], check: ([id, p]) => { checkId(id); splitSafePath(p); }, fn: cmdDownload },
+  'db-download': {
+    args: [2],
+    check: ([id, f]) => { checkId(id); if (!DB_FILE_RE.test(f)) throw new UsageError('Invalid dump file name'); },
+    fn: cmdDbDownload,
+  },
+  verify: { args: [1], check: ([id]) => checkId(id), lock: true, fn: cmdVerify },
+  'restore-container': {
+    args: [3], check: ([id, name, newName]) => { checkId(id); checkContainer(name); checkNewName(newName); }, lock: true, fn: cmdRestoreContainer,
+  },
+  prune: { args: [0], opts: ['dryRun'], lock: (o) => !o.dryRun, fn: cmdPrune },
+  'init-disk': { args: [0], lock: true, fn: cmdInitDisk },
+};
+
+function parseArgs(argv) {
+  const pos = [];
+  const opts = {};
+  let rest = false;
+  for (const a of argv) {
+    if (rest || !a.startsWith('-')) pos.push(a);
+    else if (a === '--') rest = true;
+    else if (a === '--dry-run') opts.dryRun = true;
+    else if (a.startsWith('--targets=')) opts.targets = a.slice(10).split(',').filter(Boolean);
+    else if (a.startsWith('--by=')) opts.by = a.slice(5);
+    else throw new UsageError(`Unknown option ${a.slice(0, 40)}`);
+  }
+  return { pos, opts };
+}
+
+// One job at a time: commands that write (or read the whole disk) re-run themselves under flock.
+// sudo resets the environment, so the panel cannot set PANEL_BACKUP_LOCKED to skip this.
+function relock(argv) {
+  fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
+  const r = spawnSync('flock', ['-n', '-E', String(EXIT_BUSY), LOCK_FILE, process.execPath, __filename, ...argv], {
+    stdio: 'inherit', env: { ...process.env, PANEL_BACKUP_LOCKED: '1' },
+  });
+  if (r.status === EXIT_BUSY) process.stderr.write('@@ERROR Another backup job (backup, verify or restore) is already running\n');
+  process.exitCode = r.status ?? 1;
+}
+
+async function main(argv) {
+  process.env.PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin';
+  process.umask(0o027);
+  const [name, ...rest] = argv;
+  const cmd = Object.hasOwn(COMMANDS, name || '') ? COMMANDS[name] : null;
+  if (!cmd) throw new UsageError(name ? `Unknown command "${String(name).slice(0, 40)}"\n${USAGE}` : USAGE);
+  const { pos, opts } = parseArgs(rest);
+  for (const k of Object.keys(opts)) if (!(cmd.opts || []).includes(k)) throw new UsageError(`${name} does not take that option`);
+  if (!cmd.args.includes(pos.length)) throw new UsageError(`Wrong number of arguments for ${name}\n${USAGE}`);
+  if (opts.targets) pickTargets(opts.targets, DEFAULTS);
+  if (opts.by !== undefined && !USER_RE.test(opts.by)) throw new UsageError('Invalid --by user');
+  if (cmd.check) cmd.check(pos);
+  if (process.getuid() !== 0 && !(name === 'run' && opts.dryRun)) throw new Error('panel-backup must run as root (use sudo)');
+  const needsLock = typeof cmd.lock === 'function' ? cmd.lock(opts) : !!cmd.lock;
+  if (needsLock && process.env.PANEL_BACKUP_LOCKED !== '1') return relock(argv);
+  return cmd.fn(pos, opts);
+}
+
+module.exports = {
+  normalizeConfig, planRetention, splitSafePath, makeId, isoWeek, dbKind, rsyncArgs, pickTargets, checkHostPath, onCalendar,
+  DEFAULTS, ID_RE, CT_RE, NEW_CT_RE, DB_FILE_RE,
+};
+
+if (require.main === module) {
+  main(process.argv.slice(2)).catch((err) => {
+    const msg = String(err.message || err);
+    if (err instanceof UsageError && msg.includes('\n')) process.stderr.write(`${msg}\n`);
+    process.stderr.write(`@@ERROR ${msg.split('\n')[0]}\n`);
+    process.exitCode = err instanceof UsageError ? 2 : 1;
+  });
+}

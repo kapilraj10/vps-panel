@@ -1,0 +1,17 @@
+# /etc/systemd/system/panel-backup.service
+# Runs one backup. Started by panel-backup.timer (daily) or by "Backup now" in the panel
+# (the panel runs `sudo panel-backup start`, which starts this unit), so a backup keeps going
+# even if the panel restarts. systemd only ever runs one instance; the helper also takes a lock.
+[Unit]
+Description=vps-panel backup to /mnt/backup
+After=network-online.target docker.service snap.lxd.daemon.service local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PANEL_BACKUP_SERVICE=1
+ExecStart=/usr/local/sbin/panel-backup run
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=infinity

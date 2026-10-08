@@ -41,6 +41,24 @@ db.exec(`
     detail   TEXT
   );
   CREATE INDEX IF NOT EXISTS audit_ts ON audit(ts);
+  CREATE TABLE IF NOT EXISTS backup_jobs (
+    id            TEXT PRIMARY KEY,
+    trigger_type  TEXT,
+    by_user       TEXT,
+    targets       TEXT,
+    status        TEXT NOT NULL,
+    phase         TEXT,
+    progress      INTEGER,
+    started_at    INTEGER,
+    finished_at   INTEGER,
+    size          INTEGER,
+    error         TEXT,
+    warning       TEXT,
+    log_path      TEXT,
+    verified_at   INTEGER,
+    verify_result TEXT,
+    audited       TEXT
+  );
 `);
 
 export const USERNAME_RE = /^[a-z][a-z0-9_-]{1,31}$/;
@@ -86,4 +104,22 @@ export const audit = {
       .run(Date.now(), username, ip, action, target, result, detail),
   recent: (limit, before) => db.prepare(`
     SELECT * FROM audit WHERE (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?`).all(before ?? null, before ?? null, limit),
+};
+
+// Mirror of the backup helper's job records (/var/lib/panel-backup/jobs/*.json), plus verify results.
+// `audited` remembers the last status written to the audit log, so restarts never log twice.
+export const backupJobs = {
+  upsert: (j) => db.prepare(`
+    INSERT INTO backup_jobs (id, trigger_type, by_user, targets, status, phase, progress, started_at, finished_at, size, error, warning, log_path)
+    VALUES (@id, @trigger, @by, @targets, @status, @phase, @progress, @startedAt, @finishedAt, @size, @error, @warning, @log)
+    ON CONFLICT(id) DO UPDATE SET trigger_type = excluded.trigger_type, by_user = excluded.by_user, targets = excluded.targets,
+      status = excluded.status, phase = excluded.phase, progress = excluded.progress, started_at = excluded.started_at,
+      finished_at = excluded.finished_at, size = excluded.size, error = excluded.error, warning = excluded.warning,
+      log_path = excluded.log_path`).run(j),
+  get: (id) => db.prepare('SELECT * FROM backup_jobs WHERE id = ?').get(id),
+  recent: (limit, before) => db.prepare(`
+    SELECT * FROM backup_jobs WHERE (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?`).all(before ?? null, before ?? null, limit),
+  setAudited: (id, status) => db.prepare('UPDATE backup_jobs SET audited = ? WHERE id = ?').run(status, id),
+  setVerify: (id, result) => db.prepare('UPDATE backup_jobs SET verified_at = ?, verify_result = ? WHERE id = ?')
+    .run(Date.now(), JSON.stringify(result), id),
 };

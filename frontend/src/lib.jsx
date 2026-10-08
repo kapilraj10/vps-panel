@@ -98,7 +98,7 @@ export function ChartTip({ active, payload, label, unit }) {
 }
 
 // Modal built on <dialog>: opens when `open` is true, Escape / Cancel call onClose
-export function Dialog({ open, title, children, onClose }) {
+export function Dialog({ open, title, children, onClose, wide = false }) {
   const ref = useRef(null);
   useEffect(() => {
     const el = ref.current;
@@ -106,7 +106,7 @@ export function Dialog({ open, title, children, onClose }) {
     if (!open && el.open) el.close();
   }, [open]);
   return (
-    <dialog ref={ref} className="dialog" onCancel={(e) => { e.preventDefault(); onClose(); }}>
+    <dialog ref={ref} className={wide ? 'dialog dialog--wide' : 'dialog'} onCancel={(e) => { e.preventDefault(); onClose(); }}>
       <h2>{title}</h2>
       {children}
     </dialog>
