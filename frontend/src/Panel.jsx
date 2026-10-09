@@ -5,6 +5,7 @@ import ContainerCard from './ContainerCard.jsx';
 import Users from './Users.jsx';
 import Audit from './Audit.jsx';
 import Backups from './Backups.jsx';
+import Network from './Network.jsx';
 import { api, setCsrf, MAX_POINTS, Dialog } from './lib.jsx';
 
 const ADMIN_PAGES = [
@@ -12,6 +13,7 @@ const ADMIN_PAGES = [
   ['containers', 'Containers'],
   ['users', 'Users'],
   ['backups', 'Backups'],
+  ['network', 'Network'],
   ['audit', 'Audit log'],
 ];
 
@@ -131,6 +133,8 @@ export default function Panel() {
     body = <Users me={me} />;
   } else if (current === 'backups') {
     body = <Backups socket={socket} />;
+  } else if (current === 'network') {
+    body = <Network socket={socket} />;
   } else {
     body = <Audit />;
   }

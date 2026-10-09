@@ -374,6 +374,20 @@ a.btn { display: inline-block; text-decoration: none; }
 .login__box h1 { margin-bottom: -10px; }
 .login__box .top__meta { margin-bottom: 6px; }
 
+/* ---------- network ---------- */
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+.stat { display: grid; gap: 4px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); }
+.stat__label { color: var(--muted); font-size: 0.85rem; font-weight: 500; }
+.stat__value { font-size: 1.6rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat__value small { font-size: 0.85rem; font-weight: 500; color: var(--muted); }
+.stat--live { border-color: var(--signal); }
+.stat--live .stat__value { color: var(--signal); }
+.net-phase { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 14px; margin-top: 14px; }
+.net-sub { margin-top: 22px; }
+.net-form { margin-top: 12px; grid-template-columns: minmax(0, 1fr) 120px auto; }
+.net-table { margin-top: 16px; }
+.warn-text { color: var(--warn); font-weight: 600; }
+
 /* ---------- small screens ---------- */
 @media (max-width: 860px) {
   .pulse { grid-template-columns: 1fr; padding: 22px; }
@@ -386,6 +400,9 @@ a.btn { display: inline-block; text-decoration: none; }
   .ct__meters .net { grid-template-columns: 80px 1fr; }
   .bar__inner, .page { padding-left: 16px; padding-right: 16px; }
   .bk-two { grid-template-columns: 1fr; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .net-form { grid-template-columns: 1fr; }
+  .net-phase { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

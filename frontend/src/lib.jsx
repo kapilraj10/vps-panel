@@ -50,6 +50,7 @@ export function useColors() {
 // ---------- API ----------
 let csrfToken = '';
 export const setCsrf = (t) => { csrfToken = t; };
+export const getCsrf = () => csrfToken;
 
 export async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch(path, {

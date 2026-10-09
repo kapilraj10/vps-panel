@@ -166,6 +166,24 @@ Ani `http://localhost:5173` kholnus.
 
 ---
 
+## Network (ping ra speed test)
+
+**Network** tab (admin matra; user le kholna khojda server le `403` dincha):
+
+- **Server internet speed:** server bata Cloudflare ko speed test server (`speed.cloudflare.com`) samma download, upload, latency ra jitter napcha.
+  Lagbhag 20 second lagcha, eutai patak ek wota matra chalcha. Last 20 result memory ma rakhcha (panel restart garda hatcha), ra har test **Audit log** ma jancha.
+- **Ping / latency:** server bata kunai host wa IP ma `ping` pathaucha (3–20 packet). Loss, min / avg / max ra jitter dekhaucha.
+  "Ping common servers" le 1.1.1.1, 8.8.8.8, google.com, github.com ra speed.cloudflare.com ekai choti ping garcha.
+- **Your connection to the panel:** tapai ko browser bata panel samma (Cloudflare Tunnel hudai) ko speed ra latency.
+
+Naya npm package chahindaina. Server ma `ping` hunu parcha (`sudo apt install -y iputils-ping`, Ubuntu ma pahile dekhi nai huncha). Update garna:
+```
+cd ~/vps-panel/frontend && npm run build
+pm2 restart vps-panel
+```
+
+---
+
 ## Users, login ra LXD containers
 
 ### What changed
@@ -277,7 +295,13 @@ The **Backups** tab (admin only) backs the server up to the HDD mounted at `/mnt
 
 ### Backups: install (once, on the server)
 
-Run these one at a time, as `kapil`. Lines starting with `#` are notes, not commands.
+**Short way:** `system/install-backups.sh` does steps 1 and 3–7 below, with safety checks (it refuses to touch the SSD):
+```
+cd ~/vps-panel && sudo bash system/install-backups.sh --uuid <HDD-UUID>     # find the UUID with: lsblk -f
+```
+Then do steps 8–9. To update the helper later, run it again without `--uuid`.
+
+**By hand:** run these one at a time, as `kapil`. Lines starting with `#` are notes, not commands.
 
 ```
 # 1. Tools (smartmontools gives the SMART health on the page; optional)
