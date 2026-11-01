@@ -1,31 +1,50 @@
 :root {
-  --paper: #edf0f4;
-  --surface: #ffffff;
-  --ink: #141c2e;
-  --muted: #5e6880;
-  --line: #d5dae3;
-  --signal: #1f4fd1;
-  --ram: #0f8c7a;
-  --warn: #c98612;
-  --alarm: #c8372d;
-  --radius-lg: 14px;
-  --radius-sm: 6px;
+  /* surfaces and ink (validated chart palette: see docs/KAPIL_CLOUD.md) */
+  --paper: #f4f4f1;
+  --surface: #fcfcfb;
+  --surface-2: #f0efec;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #6f6d68;
+  --line: #e1e0d9;
+  --line-strong: #c3c2b7;
+  /* categorical series, fixed order */
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --s3: #1baf7a;
+  --signal: var(--s1);
+  --ram: var(--s2);
+  /* status (reserved, always with a label or icon) */
+  --good: #0a8a0a;
+  --warn: #b97800;
+  --alarm: #d03b3b;
+  --accent: #2a78d6;
+  --accent-ink: #ffffff;
+  --shadow: 0 1px 2px rgba(11, 11, 11, 0.04), 0 4px 16px rgba(11, 11, 11, 0.05);
+  --radius-lg: 12px;
+  --radius-sm: 7px;
   color-scheme: light;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --paper: #0e1424;
-    --surface: #151d31;
-    --ink: #e6eaf2;
-    --muted: #8c96ad;
-    --line: #26304a;
-    --signal: #7c9bff;
-    --ram: #3cc4ae;
-    --warn: #e3a93a;
-    --alarm: #f06a5f;
-    color-scheme: dark;
-  }
+:root[data-theme='dark'] {
+  --paper: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --muted: #9a988f;
+  --line: #2c2c2a;
+  --line-strong: #383835;
+  --s1: #3987e5;
+  --s2: #d95926;
+  --s3: #199e70;
+  --good: #0ca30c;
+  --warn: #fab219;
+  --alarm: #e66767;
+  --accent: #3987e5;
+  --accent-ink: #ffffff;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 24px rgba(0, 0, 0, 0.35);
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -76,7 +95,7 @@ code { font-size: 0.9em; background: var(--paper); padding: 1px 6px; border-radi
   font-weight: 500;
 }
 .status__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-.status--live .status__dot { background: var(--ram); animation: beat 2s ease-in-out infinite; }
+.status--live .status__dot { background: var(--good); animation: beat 2s ease-in-out infinite; }
 .status--offline .status__dot { background: var(--alarm); }
 
 @keyframes beat {
@@ -258,9 +277,9 @@ tr:last-child td { border-bottom: 0; }
   min-width: 0;
 }
 .form--row { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); align-items: end; }
-.good { color: var(--ram); font-weight: 500; }
+.good { color: var(--good); font-weight: 500; }
 p.bad, p.good { margin: 0; }
-.banner--ok { border-left-color: var(--ram); }
+.banner--ok { border-left-color: var(--good); }
 .panel + .panel { margin-top: 20px; }
 .panel__head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 
@@ -293,12 +312,12 @@ p.bad, p.good { margin: 0; }
 .ct__actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
 .ct__note { margin: 12px 0 0; font-size: 0.9rem; }
 .ct__note--busy { color: var(--warn); }
-.ct__note--ok { color: var(--ram); }
+.ct__note--ok { color: var(--good); }
 .ct__note--bad { color: var(--alarm); }
 .status--stopped .status__dot { background: var(--alarm); }
 
 /* ---------- backups ---------- */
-.status--ok .status__dot { background: var(--ram); }
+.status--ok .status__dot { background: var(--good); }
 .status--bad .status__dot { background: var(--alarm); }
 .status--busy .status__dot { background: var(--warn); animation: beat 1.2s ease-in-out infinite; }
 .bk-top > .panel + .panel { margin-top: 0; }

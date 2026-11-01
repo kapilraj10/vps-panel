@@ -26,7 +26,8 @@ export function ago(t) {
   const s = Math.round((Date.now() - t) / 1000);
   if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  return `${Math.round(s / 3600)}h ago`;
+  if (s < 172800) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
 }
 const level = (p) => (p >= 90 ? 'alarm' : p >= 75 ? 'warn' : 'ok');
 
@@ -35,17 +36,33 @@ export function useColors() {
   const read = () => {
     const s = getComputedStyle(document.documentElement);
     const v = (n) => s.getPropertyValue(n).trim();
-    return { muted: v('--muted'), line: v('--line'), signal: v('--signal'), ram: v('--ram'), surface: v('--surface'), ink: v('--ink') };
+    return {
+      muted: v('--muted'), line: v('--line'), signal: v('--s1'), ram: v('--s2'), s1: v('--s1'), s2: v('--s2'), s3: v('--s3'),
+      surface: v('--surface'), ink: v('--ink'), good: v('--good'), warn: v('--warn'), alarm: v('--alarm'),
+    };
   };
   const [c, setC] = useState(read);
   useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
     const update = () => setC(read());
-    mq.addEventListener('change', update);
-    return () => mq.removeEventListener('change', update);
+    window.addEventListener('themechange', update);
+    return () => window.removeEventListener('themechange', update);
   }, []);
   return c;
 }
+
+// ---------- theme: 'light' | 'dark' | 'system' (stored per browser) ----------
+const mq = typeof window !== 'undefined' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+export const getThemePref = () => localStorage.getItem('theme') || 'system';
+export function applyTheme(pref = getThemePref()) {
+  const dark = pref === 'dark' || (pref === 'system' && mq?.matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  window.dispatchEvent(new Event('themechange'));
+}
+export function setThemePref(pref) {
+  localStorage.setItem('theme', pref);
+  applyTheme(pref);
+}
+mq?.addEventListener('change', () => { if (getThemePref() === 'system') applyTheme('system'); });
 
 // ---------- API ----------
 let csrfToken = '';
@@ -64,7 +81,12 @@ export async function api(path, { method = 'GET', body } = {}) {
     throw new Error('Please log in');
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(data.error || `Request failed (${res.status})`);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 

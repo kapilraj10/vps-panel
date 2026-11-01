@@ -6,13 +6,22 @@ import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
 import si from 'systeminformation';
 import {
-  loadSession, requireAuth, requireAdmin, csrfProtect, loginLimit, clientIp, sessionFromHeader,
-  startSession, endSession, hashPassword, checkPassword, DUMMY_HASH,
+  loadSession, requireAuth, requireAdmin, csrfProtect, loginLimit, clientIp, sessionFromHeader, rateLimit, safeEqual,
+  startSession, endSession, checkPassword, DUMMY_HASH, isAdmin,
 } from './auth.js';
-import { users, sessions, audit, USERNAME_RE, CONTAINER_RE, MIN_PASSWORD } from './db.js';
+import { users, sessions, audit, backupJobs, db, settings } from './db.js';
 import { createContainerMonitor, roomFor } from './containers.js';
 import { createBackups } from './backups.js';
 import { createNetwork } from './network.js';
+import { createMonitoring } from './monitoring.js';
+import { createAllocator } from './resources.js';
+import { createServers } from './servers.js';
+import { createTerminal } from './terminal.js';
+import { createApps } from './apps.js';
+import { createDomains } from './domains.js';
+import { createSshKeys } from './sshkeys.js';
+import { createUsers } from './users.js';
+import { HttpError } from './http.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -25,6 +34,7 @@ const INGEST_TOKEN = process.env.INGEST_TOKEN || '';
 const MAX_POINTS = Math.ceil((HISTORY_MINUTES * 60_000) / SAMPLE_MS);
 const PROCESS_EVERY = 3; // process list is heavier, read it every 3rd sample
 const MAX_APPS = 50;
+const BACKUP_DISK_CHECK_MS = 10 * 60_000;
 
 // ---------- State (in memory) ----------
 const history = [];
@@ -34,6 +44,7 @@ let topProcs = [];
 let tick = 0;
 let info = null;
 let hostMem = 0;
+let backupDisk = null;
 
 const round = (n) => Math.round((Number(n) || 0) * 10) / 10;
 const toInt = (n) => Math.max(0, Math.floor(Number(n) || 0));
@@ -47,6 +58,7 @@ async function loadInfo() {
     kernel: os.kernel,
     cpu: `${cpu.manufacturer} ${cpu.brand}`.trim(),
     cores: cpu.cores,
+    memTotal: mem.total,
     sampleMs: SAMPLE_MS,
   };
 }
@@ -69,29 +81,25 @@ function appList() {
 }
 
 function snapshot() {
-  return {
-    info,
-    history,
-    apps: appList(),
-    processes: topProcs,
-    uptime: si.time().uptime,
-  };
+  return { info, history, apps: appList(), processes: topProcs, uptime: si.time().uptime };
 }
 
 async function takeSample() {
-  const [load, mem, disks, nets, temp] = await Promise.all([
+  const [load, mem, disks, nets, temp, fsStats] = await Promise.all([
     si.currentLoad(),
     si.mem(),
     si.fsSize(),
     si.networkStats('*'),
     si.cpuTemperature(),
+    si.fsStats().catch(() => null),
   ]);
 
   const root = disks.find((d) => d.mount === '/') || disks[0] || { used: 0, size: 0 };
   let rx = 0;
   let tx = 0;
   for (const n of nets) {
-    if (n.iface === 'lo') continue;
+    // Container veth pairs and the bridge would count container traffic twice
+    if (n.iface === 'lo' || /^(veth|lxdbr|br-|docker|virbr)/.test(n.iface)) continue;
     rx += n.rx_sec > 0 ? n.rx_sec : 0;
     tx += n.tx_sec > 0 ? n.tx_sec : 0;
   }
@@ -109,33 +117,26 @@ async function takeSample() {
     rx: Math.round(rx),
     tx: Math.round(tx),
     temp: temp.main > 0 ? round(temp.main) : null,
+    load1: round(load.avgLoad),
+    ioRead: fsStats?.rx_sec > 0 ? Math.round(fsStats.rx_sec) : 0,
+    ioWrite: fsStats?.wx_sec > 0 ? Math.round(fsStats.wx_sec) : 0,
     req,
   };
 
   history.push(point);
   if (history.length > MAX_POINTS) history.shift();
+  monitoring.recordHost(point);
 
   if (tick++ % PROCESS_EVERY === 0) {
     const procs = await si.processes();
     topProcs = procs.list
       .sort((a, b) => b.cpu - a.cpu)
-      .slice(0, 6)
-      .map((p) => ({
-        pid: p.pid,
-        name: p.name,
-        user: p.user,
-        cpu: round(p.cpu),
-        mem: (p.memRss || 0) * 1024, // memRss is in KB
-      }));
+      .slice(0, 8)
+      .map((p) => ({ pid: p.pid, name: p.name, user: p.user, cpu: round(p.cpu), mem: (p.memRss || 0) * 1024 }));
   }
 
   // Host stats are for admins only
-  io.to('admin').emit('sample', {
-    point,
-    uptime: si.time().uptime,
-    processes: topProcs,
-    apps: appList(),
-  });
+  io.to('admin').emit('sample', { point, uptime: si.time().uptime, processes: topProcs, apps: appList() });
 }
 
 async function loop() {
@@ -150,6 +151,7 @@ async function loop() {
 // ---------- HTTP ----------
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', false);
 app.use((_req, res, next) => {
   res.set({
     'Content-Security-Policy': [
@@ -166,13 +168,15 @@ app.use((_req, res, next) => {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'same-origin',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
   });
   next();
 });
-app.use(express.json({ limit: '50kb' }));
+app.use(express.json({ limit: '100kb' }));
 
 const server = http.createServer(app);
 const io = new Server(server, {
+  maxHttpBufferSize: 256 * 1024,
   // Block other websites from opening a socket with the user's cookie
   allowRequest: (req, cb) => {
     const origin = req.headers.origin;
@@ -180,19 +184,55 @@ const io = new Server(server, {
   },
 });
 
+// ---------- modules ----------
+const monitoring = createMonitoring({ io });
 const containers = createContainerMonitor({
   io, sampleMs: SAMPLE_MS, maxPoints: MAX_POINTS, hostCores: () => info?.cores || 1, hostMem: () => hostMem,
+  onSample: (name, s) => monitoring.recordContainer(name, s),
+  onUnexpectedStop: (name) => monitoring.raise('container_stopped', `ct:${name}`, 'critical', `${name} stopped without anyone asking the panel to stop it`),
+  onRecovered: (name) => monitoring.clear('container_stopped', `ct:${name}`),
 });
-const backups = createBackups({ io, containers });
+const allocator = createAllocator({ containers, hostCores: () => info?.cores || 1, hostMem: () => hostMem });
+const backups = createBackups({
+  io, containers,
+  onJobFinished: (row) => {
+    if (row.status === 'failed') monitoring.raise('backup_failed', 'backup', 'critical', `Backup ${row.id} failed: ${row.error || 'see its log'}`);
+    else if (row.status === 'success') monitoring.clear('backup_failed', 'backup');
+  },
+});
 const network = createNetwork({ io });
+const terminal = createTerminal({ containers });
+const servers = createServers({ io, containers, allocator });
+const appsMod = createApps({ io, containers });
+const domains = createDomains({ containers, monitoring });
+const sshKeys = createSshKeys({ containers });
+const usersMod = createUsers({ io, containers, terminal });
 
-// Your other apps send request counts here (see panel-tracker.js).
+// Backup disk: mounted, free space, SMART (through the root helper, cached)
+async function checkBackupDisk() {
+  try {
+    const d = await backups.diskStatus(true);
+    backupDisk = { at: Date.now(), ...d };
+    if (!d.mounted) monitoring.raise('backup_disk', 'backup-disk', 'critical', `Backup disk is not mounted at ${d.mountpoint}`);
+    else monitoring.clear('backup_disk', 'backup-disk');
+    const freePct = d.total ? (d.free / d.total) * 100 : null;
+    const limit = Number(settings.get('alert_backup_disk_free') ?? 15);
+    if (freePct != null && freePct < limit) monitoring.raise('backup_disk_space', 'backup-disk', freePct < limit / 2 ? 'critical' : 'warning', `Backup disk has only ${freePct.toFixed(0)}% free`);
+    else monitoring.clear('backup_disk_space', 'backup-disk');
+    if (d.smart?.health === 'FAILED') monitoring.raise('backup_disk_smart', 'backup-disk', 'critical', 'Backup disk SMART health check FAILED. Replace the disk.');
+    else monitoring.clear('backup_disk_smart', 'backup-disk');
+  } catch (err) {
+    backupDisk = { at: Date.now(), error: err.message };
+  }
+}
+
+// Your other apps send request counts here (see panel-tracker.cjs).
 // Machine-to-machine: protected by INGEST_TOKEN instead of a login session.
 app.post('/api/ingest', (req, res) => {
   if (!INGEST_TOKEN) {
     return res.status(503).json({ error: 'Set INGEST_TOKEN in backend/.env to accept request counts' });
   }
-  if (req.get('x-panel-token') !== INGEST_TOKEN) {
+  if (!safeEqual(req.get('x-panel-token') || '', INGEST_TOKEN)) {
     return res.status(401).json({ error: 'Wrong panel token' });
   }
 
@@ -216,15 +256,18 @@ app.post('/api/ingest', (req, res) => {
   res.json({ ok: true });
 });
 
+// Health check for uptime monitors / deploy scripts (no secrets, no login)
+app.get('/healthz', (_req, res) => {
+  let dbOk = true;
+  try { db.prepare('SELECT 1').get(); } catch { dbOk = false; }
+  res.set('Cache-Control', 'no-store');
+  res.status(dbOk ? 200 : 503).json({ ok: dbOk, lxd: !containers.error(), uptime: Math.round(process.uptime()) });
+});
+
 app.use(loadSession);
 app.use(csrfProtect);
+app.use('/api', rateLimit({ perMinute: 600 }));
 
-const isStr = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
-const passwordProblem = (pw) => {
-  if (typeof pw !== 'string' || pw.length < MIN_PASSWORD) return `Password must be at least ${MIN_PASSWORD} characters`;
-  if (Buffer.byteLength(pw) > 72) return 'Password must be at most 72 bytes';
-  return null;
-};
 const kick = (room) => io.in(room).disconnectSockets(true);
 
 // ---------- login / logout (public) ----------
@@ -232,7 +275,7 @@ app.post('/api/login', async (req, res) => {
   const ip = clientIp(req);
   const wait = loginLimit.retryAfter(ip);
   const { username, password } = req.body ?? {};
-  const name = isStr(username, 64) ? username.trim().toLowerCase() : '';
+  const name = typeof username === 'string' && username.length <= 64 ? username.trim().toLowerCase() : '';
   if (wait) {
     audit.log({ username: name || null, ip, action: 'login', result: 'failure', detail: 'rate limited' });
     res.set('Retry-After', String(wait));
@@ -240,16 +283,21 @@ app.post('/api/login', async (req, res) => {
   }
 
   const user = name ? users.withHash(name) : null;
-  const pw = isStr(password, 200) ? password : '';
+  const pw = typeof password === 'string' && password.length <= 200 ? password : '';
   const ok = await checkPassword(pw, user?.password_hash || DUMMY_HASH);
   if (!user || !ok) {
     loginLimit.fail(ip);
     audit.log({ username: name || null, ip, action: 'login', result: 'failure', detail: user ? 'wrong password' : 'unknown user' });
     return res.status(401).json({ error: 'Wrong username or password' });
   }
+  if (user.status !== 'active') {
+    audit.log({ username: user.username, ip, action: 'login', result: 'failure', detail: 'account suspended' });
+    return res.status(403).json({ error: 'This account is suspended. Contact the administrator.' });
+  }
 
   if (req.session) endSession(res, req.session.token_hash); // never reuse a session across logins
-  startSession(res, user.id);
+  startSession(res, user.id, { ip, userAgent: req.get('user-agent') });
+  users.markLogin(user.id, ip);
   audit.log({ username: user.username, ip, action: 'login', result: 'success' });
   return res.json({ ok: true });
 });
@@ -276,142 +324,81 @@ app.use(requireAuth);
 // ---------- account ----------
 app.get('/api/me', (req, res) => {
   const s = req.session;
+  const u = users.byId(s.id);
   res.set('Cache-Control', 'no-store');
-  res.json({ username: s.username, role: s.role, container: s.role === 'user' ? s.container_name : null, csrf: s.csrf });
-});
-
-app.post('/api/password', async (req, res) => {
-  const { current, next } = req.body ?? {};
-  const s = req.session;
-  if (!isStr(current, 200) || !(await checkPassword(current, users.hashById(s.id)))) {
-    audit.log({ username: s.username, ip: clientIp(req), action: 'password_change', result: 'failure', detail: 'wrong current password' });
-    return res.status(400).json({ error: 'Current password is wrong' });
-  }
-  const problem = passwordProblem(next);
-  if (problem) return res.status(400).json({ error: problem });
-  users.setPassword(s.id, await hashPassword(next));
-  sessions.removeForUser(s.id, s.token_hash); // log out other devices
-  audit.log({ username: s.username, ip: clientIp(req), action: 'password_change', result: 'success' });
-  res.json({ ok: true });
+  res.json({
+    id: s.id, username: s.username, role: s.role, isAdmin: isAdmin(s), containers: s.containers, csrf: s.csrf,
+    fullName: u?.full_name || null, email: u?.email || null, lastLoginAt: u?.last_login_at || null,
+    // kept for older frontends
+    container: s.role === 'user' ? s.containers[0] || null : null,
+  });
 });
 
 // ---------- host stats (admin) ----------
 app.get('/api/snapshot', requireAdmin, (_req, res) => res.json(snapshot()));
 
-// ---------- containers ----------
-// Resolves which container a request may touch. For role "user" the container always comes
-// from their DB record; asking for any other name is 403, whether or not it exists.
-function allowedContainer(req, res) {
-  const asked = req.params.name;
+app.get('/api/overview', (req, res) => {
   const s = req.session;
-  let name;
-  if (s.role === 'admin') {
-    name = asked;
-  } else {
-    if (!s.container_name || asked !== s.container_name) {
-      res.status(403).json({ error: 'You can only access your own container' });
-      return null;
-    }
-    name = s.container_name;
-  }
-  if (!CONTAINER_RE.test(name) || !containers.exists(name)) {
-    res.status(404).json({ error: containers.error() ? `LXD is not reachable: ${containers.error()}` : 'No such container' });
-    return null;
-  }
-  return name;
-}
-
-app.get('/api/containers', (req, res) => {
-  const s = req.session;
-  const names = s.role === 'admin' ? containers.names() : containers.names().filter((n) => n === s.container_name);
-  res.json({ containers: names.map(containers.view), error: containers.error() });
-});
-
-app.get('/api/containers/:name', (req, res) => {
-  const name = allowedContainer(req, res);
-  if (name) res.json(containers.view(name));
-});
-
-const ACTIONS = new Set(['start', 'stop', 'restart']);
-app.post('/api/containers/:name/action', (req, res) => {
-  const name = allowedContainer(req, res);
-  if (!name) return;
-  const action = req.body?.action;
-  const s = req.session;
-  const ip = clientIp(req);
-  if (!ACTIONS.has(action)) return res.status(400).json({ error: 'action must be start, stop or restart' });
-  if (containers.busy(name)) return res.status(409).json({ error: 'Another action is still running on this container' });
-
-  audit.log({ username: s.username, ip, action, target: name, result: 'requested' });
-  const job = containers.run(name, action, s.username, (done) => {
-    audit.log({ username: s.username, ip, action, target: name, result: done.status, detail: done.message || null });
+  res.set('Cache-Control', 'no-store');
+  const mine = containers.all().filter((c) => c && (isAdmin(s) || s.containers.includes(c.name)));
+  const base = {
+    servers: { total: mine.length, running: mine.filter((c) => c.status === 'Running').length, stopped: mine.filter((c) => c.status !== 'Running').length },
+    apps: isAdmin(s) ? db.prepare('SELECT COUNT(*) AS n FROM apps').get().n : db.prepare(`SELECT COUNT(*) AS n FROM apps WHERE container IN (SELECT container FROM user_containers WHERE user_id = ?)`).get(s.id).n,
+    domains: isAdmin(s) ? db.prepare("SELECT COUNT(*) AS n FROM domains WHERE status = 'active'").get().n : db.prepare("SELECT COUNT(*) AS n FROM domains WHERE status = 'active' AND container IN (SELECT container FROM user_containers WHERE user_id = ?)").get(s.id).n,
+  };
+  if (!isAdmin(s)) return res.json(base);
+  const activeSince = Date.now() - 15 * 60_000;
+  const lastJob = backupJobs.recent(1)[0] || null;
+  return res.json({
+    ...base,
+    host: { info, last: history.at(-1) || null, uptime: si.time().uptime },
+    users: {
+      total: users.list().length,
+      active: db.prepare('SELECT COUNT(DISTINCT user_id) AS n FROM sessions WHERE last_seen_at > ? AND expires_at > ?').get(activeSince, Date.now()).n,
+      suspended: db.prepare("SELECT COUNT(*) AS n FROM users WHERE status = 'suspended'").get().n,
+    },
+    backup: { lastJob: lastJob && { id: lastJob.id, status: lastJob.status, finishedAt: lastJob.finished_at, size: lastJob.size, error: lastJob.error }, disk: backupDisk },
+    alerts: monitoring.openAlerts(),
+    pendingDomains: db.prepare("SELECT COUNT(*) AS n FROM domains WHERE status = 'pending'").get().n,
+    lxdError: containers.error(),
+    terminals: terminal.list().length,
   });
-  res.status(202).json(job);
-});
-
-// ---------- user management (admin) ----------
-app.get('/api/users', requireAdmin, (_req, res) => res.json({ users: users.list(), containers: containers.names() }));
-
-app.post('/api/users', requireAdmin, async (req, res) => {
-  const { username, password, role, container } = req.body ?? {};
-  const name = typeof username === 'string' ? username.trim().toLowerCase() : '';
-  if (!USERNAME_RE.test(name)) return res.status(400).json({ error: 'Username: 2-32 lowercase letters, digits, _ or -, starting with a letter' });
-  if (!['admin', 'user'].includes(role)) return res.status(400).json({ error: 'Role must be admin or user' });
-  if (role === 'user' && (typeof container !== 'string' || !CONTAINER_RE.test(container) || !containers.exists(container))) {
-    return res.status(400).json({ error: 'Pick a container that exists in LXD' });
-  }
-  const problem = passwordProblem(password);
-  if (problem) return res.status(400).json({ error: problem });
-  if (users.withHash(name)) return res.status(409).json({ error: 'That username is taken' });
-
-  users.create({ username: name, passwordHash: await hashPassword(password), role, container });
-  audit.log({ username: req.session.username, ip: clientIp(req), action: 'user_create', target: name, result: 'success', detail: role === 'user' ? `container ${container}` : 'admin' });
-  res.status(201).json({ ok: true });
-});
-
-function targetUser(req, res) {
-  const target = /^\d+$/.test(req.params.id) ? users.byId(Number(req.params.id)) : null;
-  if (!target) res.status(404).json({ error: 'No such user' });
-  return target;
-}
-
-app.post('/api/users/:id/password', requireAdmin, async (req, res) => {
-  const target = targetUser(req, res);
-  if (!target) return;
-  const problem = passwordProblem(req.body?.password);
-  if (problem) return res.status(400).json({ error: problem });
-  users.setPassword(target.id, await hashPassword(req.body.password));
-  sessions.removeForUser(target.id, target.id === req.session.id ? req.session.token_hash : '');
-  if (target.id !== req.session.id) kick(`user:${target.id}`);
-  audit.log({ username: req.session.username, ip: clientIp(req), action: 'user_password_reset', target: target.username, result: 'success' });
-  res.json({ ok: true });
-});
-
-app.delete('/api/users/:id', requireAdmin, (req, res) => {
-  const target = targetUser(req, res);
-  if (!target) return;
-  if (target.id === req.session.id) return res.status(400).json({ error: 'You cannot delete yourself' });
-  if (target.role === 'admin' && users.adminCount() <= 1) return res.status(400).json({ error: 'Cannot delete the last admin' });
-  users.remove(target.id); // sessions go with it (ON DELETE CASCADE)
-  kick(`user:${target.id}`);
-  audit.log({ username: req.session.username, ip: clientIp(req), action: 'user_delete', target: target.username, result: 'success' });
-  res.json({ ok: true });
 });
 
 // ---------- audit log (admin) ----------
 app.get('/api/audit', requireAdmin, (req, res) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
   const before = /^\d+$/.test(req.query.before || '') ? Number(req.query.before) : null;
-  res.json({ entries: audit.recent(limit, before) });
+  const filters = {
+    username: typeof req.query.user === 'string' && req.query.user ? req.query.user.slice(0, 64) : null,
+    action: typeof req.query.action === 'string' && req.query.action ? req.query.action.slice(0, 64) : null,
+    q: typeof req.query.q === 'string' && req.query.q.trim() ? req.query.q.trim().slice(0, 100) : null,
+  };
+  res.json({ entries: audit.recent(limit, before, filters) });
 });
 
-// ---------- backups (admin) ----------
+// ---------- modules ----------
+app.use('/api', servers.router);
+app.use('/api', usersMod.router);
+app.use('/api', appsMod.router);
+app.use('/api', domains.router);
+app.use('/api', sshKeys.router);
+app.use('/api', monitoring.router);
+app.use('/api/my-backups', backups.userRouter);
 app.use('/api/backups', requireAdmin, backups.router);
-
-// ---------- network: ping + speed tests (admin) ----------
 app.use('/api/net', requireAdmin, network.router);
+app.get('/api/terminals', requireAdmin, (_req, res) => res.json({ terminals: terminal.list() }));
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
+
+// Central error handler: known errors keep their status, anything else is logged and returned as 500
+app.use((err, req, res, _next) => {
+  if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'Request body is not valid JSON' });
+  if (err?.type === 'entity.too.large') return res.status(413).json({ error: 'Request body is too large' });
+  const status = err instanceof HttpError || (err?.status >= 400 && err?.status < 600) ? err.status : 500;
+  if (status >= 500) console.error(`${req.method} ${req.path} failed:`, err);
+  return res.status(status).json({ error: err?.message || 'Something went wrong' });
+});
 
 // Logged-in pages
 app.use(express.static(dist, { index: false }));
@@ -427,15 +414,17 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
   const s = socket.data.session;
+  const ip = (typeof socket.handshake.headers['cf-connecting-ip'] === 'string' && socket.handshake.headers['cf-connecting-ip'].slice(0, 64)) || socket.handshake.address;
   socket.join([`sess:${s.token_hash}`, `user:${s.id}`]);
-  if (s.role === 'admin') {
+  if (isAdmin(s)) {
     socket.join('admin');
     socket.emit('init', snapshot());
     socket.emit('containers:init', containers.names().map(containers.view));
-  } else if (s.container_name) {
-    socket.join(roomFor(s.container_name));
-    socket.emit('containers:init', containers.exists(s.container_name) ? [containers.view(s.container_name)] : []);
+  } else {
+    socket.join(s.containers.map(roomFor));
+    socket.emit('containers:init', s.containers.filter(containers.exists).map(containers.view));
   }
+  terminal.attach(socket, ip);
 });
 
 // Drop live sockets whose session expired or was revoked
@@ -447,10 +436,26 @@ setInterval(async () => {
 
 await loadInfo();
 server.listen(PORT, HOST, () => {
-  console.log(`VPS panel running on http://${HOST}:${PORT}`);
+  console.log(`Kapil Cloud panel running on http://${HOST}:${PORT}`);
   if (!INGEST_TOKEN) console.log('INGEST_TOKEN is empty: request counting is off until you set it in .env');
   if (!users.list().length) console.log('No users yet. Create the first admin with: node scripts/create-user.js');
 });
 loop();
 containers.start();
 backups.start();
+monitoring.start();
+domains.start();
+if (process.env.BACKUP_DISK_CHECK !== 'off') {
+  const diskLoop = () => checkBackupDisk().finally(() => setTimeout(diskLoop, BACKUP_DISK_CHECK_MS).unref());
+  setTimeout(diskLoop, 20_000).unref();
+}
+
+// Graceful stop for PM2 restarts: finish in-flight requests, then exit
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.once(sig, () => {
+    console.log(`${sig}: shutting down`);
+    io.close();
+    server.close(() => { db.close(); process.exit(0); });
+    setTimeout(() => process.exit(0), 5000).unref();
+  });
+}

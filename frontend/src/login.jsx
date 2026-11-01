@@ -1,7 +1,10 @@
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api } from './lib.jsx';
+import { api, applyTheme } from './lib.jsx';
 import './index.css';
+import './cloud.css';
+
+applyTheme();
 
 function Login() {
   const [username, setUsername] = useState('');
@@ -26,8 +29,9 @@ function Login() {
   return (
     <main className="login">
       <form className="panel form login__box" onSubmit={submit}>
-        <h1>Server panel</h1>
-        <p className="top__meta">Log in to see your server.</p>
+        <div className="login__brand"><span className="brand__mark">K</span><span>Kapil Cloud</span></div>
+        <h1>Sign in</h1>
+        <p className="top__meta">Manage your servers, apps and domains.</p>
         <label>Username
           <input required autoFocus autoComplete="username" autoCapitalize="none" spellCheck={false} value={username} onChange={(e) => setUsername(e.target.value)} />
         </label>

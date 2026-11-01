@@ -1,4 +1,8 @@
-# VPS Panel
+# VPS Panel → Kapil Cloud
+
+> **Kapil Cloud upgrade:** multi-user private cloud (servers, apps, domains, terminal, snapshots, monitoring, RBAC).
+> Architecture, migration, deployment and rollback: **[docs/KAPIL_CLOUD.md](docs/KAPIL_CLOUD.md)**.
+> Tests: `cd backend && npm test`. The sections below (setup, backups) still apply.
 
 Server ko CPU, RAM, disk, network, temperature, busiest processes, ra apps ma kati request aayo bhanne kura live herne panel.
 
