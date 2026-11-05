@@ -1,5 +1,6 @@
 // Docker Manager: containers (with live CPU/RAM), images, volumes, networks, Compose projects on this server.
 import { useState } from 'react';
+import { HostPicker, FleetDocker } from './FleetOps.jsx';
 import { api, bytes, ago, dateTime, Dialog } from '../lib.jsx';
 import { useLive } from '../live.js';
 import { PageHeader, Card, Badge, Empty, SkeletonRows, ErrorNote, Field, Icon, Tabs, Note, Stat, useApi, useAction, useConfirm } from '../ui.jsx';
@@ -238,7 +239,7 @@ function Compose({ sup }) {
   );
 }
 
-export default function DockerPage() {
+function LocalDockerPage({ picker }) {
   const { me } = useLive();
   const sup = me.role === 'super_admin';
   const [tab, setTab] = useState('containers');
@@ -246,7 +247,7 @@ export default function DockerPage() {
   const i = info.data;
   return (
     <>
-      <PageHeader title="Docker Manager" sub="Containers, images, volumes and networks on this server" />
+      <PageHeader title="Docker Manager" sub="Containers, images, volumes and networks on this server" actions={picker} />
       {info.error ? <ErrorNote error={info.error} onRetry={info.reload} /> : (
         <div className="kpis">
           <Stat label="Docker" icon="app" value={i ? i.version : null} sub={i ? `API ${i.api} · ${i.driver}` : ''} />
@@ -261,6 +262,18 @@ export default function DockerPage() {
       {tab === 'volumes' && <Simple kind="volumes" sup={sup} />}
       {tab === 'networks' && <Simple kind="networks" sup={sup} />}
       {tab === 'compose' && <Compose sup={sup} />}
+    </>
+  );
+}
+
+export default function DockerPage() {
+  const [host, setHost] = useState('local');
+  const picker = <HostPicker value={host} onChange={setHost} />;
+  if (host === 'local') return <LocalDockerPage picker={picker} />;
+  return (
+    <>
+      <PageHeader title="Docker Manager" sub="Containers on your servers" actions={picker} />
+      <FleetDocker key={host} nodeId={host} />
     </>
   );
 }

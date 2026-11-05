@@ -379,3 +379,40 @@ tr.click { cursor: pointer; }
   .traffic__row { grid-template-columns: 1fr 64px 60px; }
   .traffic__row input[type='range'] { grid-column: 1 / -1; grid-row: 2; }
 }
+
+/* ---------- VPS fleet ---------- */
+.row-link { cursor: pointer; }
+.row-link a { color: inherit; text-decoration: none; }
+.tabs-row { margin-bottom: 14px; }
+.section-title { font-size: 1rem; margin: 22px 0 10px; }
+.mr8 { margin-right: 8px; }
+.is-bad { color: var(--alarm); }
+.table--compact td, .table--compact th { padding: 6px 10px; }
+.cores { display: grid; gap: 6px; }
+.cores__row { display: grid; grid-template-columns: 34px 1fr 52px; gap: 10px; align-items: center; }
+.ports { display: flex; flex-wrap: wrap; gap: 6px; }
+.port { display: inline-flex; flex-direction: column; align-items: center; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; font: 600 0.85rem ui-monospace, monospace; min-width: 52px; }
+.port small { font-weight: 400; color: var(--muted); font-size: 0.68rem; }
+.port--public { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.cmd { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; }
+.cmd code { flex: 1; white-space: pre-wrap; word-break: break-all; font-size: 0.8rem; }
+.host-picker { min-width: 210px; }
+.chip-check { padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; }
+.matrix th, .matrix td { text-align: center; }
+.matrix tbody th { text-align: left; }
+.matrix__cell { cursor: pointer; min-width: 120px; }
+.matrix__cell--good { background: color-mix(in srgb, var(--good) 12%, var(--surface)); }
+.matrix__cell--warn { background: color-mix(in srgb, var(--warn) 16%, var(--surface)); }
+.matrix__cell--bad { background: color-mix(in srgb, var(--alarm) 14%, var(--surface)); color: var(--alarm); }
+.matrix__self { color: var(--muted); background: var(--surface-2); }
+.console { border: 1px solid #2c2c2a; border-radius: 12px; overflow: hidden; background: #111110; margin-bottom: 18px; }
+.console__tabs { display: flex; align-items: center; gap: 4px; padding: 6px 8px; background: #1c1c1a; border-bottom: 1px solid #2c2c2a; overflow-x: auto; }
+.console__tab { display: inline-flex; align-items: center; gap: 2px; padding: 3px 4px 3px 8px; border-radius: 8px; cursor: pointer; color: #c3c2b7; }
+.console__tab[aria-selected='true'] { background: #2a2a27; }
+.console__tab .icon-btn, .console__tabs > .icon-btn { color: #c3c2b7; }
+.console__spacer { flex: 1; }
+.console__hint { padding: 6px 12px; margin: 0; background: #1c1c1a; color: #8d8c84 !important; }
+.term--ssh { height: 62vh; padding: 6px 0 0 8px; }
+.console--full { position: fixed; inset: 0; z-index: 50; border-radius: 0; margin: 0; display: flex; flex-direction: column; }
+.console--full .term--ssh { height: auto; flex: 1; }
+.addr { max-width: 340px; word-break: break-all; }

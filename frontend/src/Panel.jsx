@@ -20,25 +20,39 @@ import Network from './Network.jsx';
 import Pm2Page from './pages/Pm2Page.jsx';
 import DockerPage from './pages/DockerPage.jsx';
 import HostApps from './pages/HostApps.jsx';
+import Fleet from './pages/Fleet.jsx';
+import NetDiag from './pages/NetDiag.jsx';
+import { Uptime, Compare } from './pages/FleetViews.jsx';
+
+const ConsolePage = lazy(() => import('./pages/Console.jsx'));
 
 const TerminalPage = lazy(() => import('./pages/TerminalPage.jsx'));
 
 const ADMIN_NAV = [
+  ['Overview', [
+    ['overview', 'Dashboard', 'dashboard'],
+    ['compare', 'Server comparison', 'chart'],
+  ]],
+  ['VPS Fleet', [
+    ['fleet', 'All servers', 'server'],
+    ['console', 'SSH console', 'terminal'],
+    ['netdiag', 'Network diagnostics', 'network'],
+    ['uptime', 'Uptime', 'activity'],
+  ]],
   ['Infrastructure', [
-    ['overview', 'Overview', 'dashboard'],
-    ['servers', 'Servers', 'server'],
+    ['servers', 'LXD servers', 'storage'],
     ['monitoring', 'Monitoring', 'chart'],
     ['network', 'Network', 'network'],
     ['backups', 'Backups', 'backup'],
   ]],
-  ['Host services', [
-    ['replicas', 'Replicas & LB', 'activity'],
+  ['Applications', [
+    ['replicas', 'Replicas & LB', 'app'],
     ['pm2', 'PM2 Manager', 'cpu'],
     ['docker', 'Docker Manager', 'storage'],
   ]],
   ['Cloud', [
     ['users', 'Users', 'users'],
-    ['apps', 'Applications', 'app'],
+    ['apps', 'Container apps', 'app'],
     ['domains', 'Domains', 'globe'],
     ['terminal', 'Terminal', 'terminal'],
   ]],
@@ -69,7 +83,7 @@ const USER_NAV = [
     ['security', 'Security', 'shield'],
   ]],
 ];
-const ALIASES = { containers: 'servers', 'audit-log': 'audit', 'load-balancer': 'replicas' };
+const ALIASES = { containers: 'servers', 'audit-log': 'audit', 'load-balancer': 'replicas', nodes: 'fleet' };
 
 function ThemeToggle() {
   const [pref, setPref] = useState(getThemePref);
@@ -184,6 +198,11 @@ function Shell() {
     case 'apps': body = <Apps selected={route[1]} />; break;
     case 'domains': body = <Domains />; break;
     case 'replicas': body = <HostApps selected={route[1]} />; break;
+    case 'fleet': body = <Fleet selected={route[1]} tab={route[2]} />; break;
+    case 'console': body = <Suspense fallback={<SkeletonRows />}><ConsolePage /></Suspense>; break;
+    case 'netdiag': body = <NetDiag />; break;
+    case 'uptime': body = <Uptime />; break;
+    case 'compare': body = <Compare />; break;
     case 'pm2': body = <Pm2Page />; break;
     case 'docker': body = <DockerPage />; break;
     case 'monitoring': body = <Monitoring />; break;

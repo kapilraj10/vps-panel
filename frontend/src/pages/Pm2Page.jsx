@@ -1,5 +1,6 @@
 // PM2 Manager: the host's PM2 processes. Admins see; super admins act.
 import { useState } from 'react';
+import { HostPicker, FleetPm2 } from './FleetOps.jsx';
 import { api, bytes, ago, Dialog } from '../lib.jsx';
 import { useLive } from '../live.js';
 import { PageHeader, Card, Badge, Empty, SkeletonRows, ErrorNote, Field, Icon, useApi, useAction, useConfirm, Stat } from '../ui.jsx';
@@ -46,7 +47,7 @@ function NewProcess({ onClose, onDone }) {
   );
 }
 
-export default function Pm2Page() {
+function LocalPm2Page({ picker }) {
   const { me } = useLive();
   const sup = me.role === 'super_admin';
   const run = useAction();
@@ -69,11 +70,12 @@ export default function Pm2Page() {
   return (
     <>
       <PageHeader title="PM2 Manager" sub="Node.js processes managed by PM2 on this server"
-        actions={sup && (
+        actions={(
           <>
-            <button type="button" className="btn" onClick={() => run(() => api('/api/pm2/save', { method: 'POST' }), 'Process list saved (restored on reboot)')}>Save list</button>
+            {picker}
+            {sup && <><button type="button" className="btn" onClick={() => run(() => api('/api/pm2/save', { method: 'POST' }), 'Process list saved (restored on reboot)')}>Save list</button>
             <button type="button" className="btn" onClick={() => run(() => api('/api/pm2/resurrect', { method: 'POST' }), 'Saved processes restored').then(reload)}>Resurrect</button>
-            <button type="button" className="btn btn--primary" onClick={() => setCreating(true)}><Icon name="plus" /> New process</button>
+            <button type="button" className="btn btn--primary" onClick={() => setCreating(true)}><Icon name="plus" /> New process</button></>}
           </>
         )} />
       <div className="kpis">
@@ -122,6 +124,18 @@ export default function Pm2Page() {
       </Card>
       {logs && <LogDialog title={`Logs: ${logs.name}`} url={`/api/pm2/processes/${logs.id}/logs?lines=300`} onClose={() => setLogs(null)} />}
       {creating && <NewProcess onClose={() => setCreating(false)} onDone={reload} />}
+    </>
+  );
+}
+
+export default function Pm2Page() {
+  const [host, setHost] = useState('local');
+  const picker = <HostPicker value={host} onChange={setHost} />;
+  if (host === 'local') return <LocalPm2Page picker={picker} />;
+  return (
+    <>
+      <PageHeader title="PM2 Manager" sub="PM2 processes on your servers" actions={picker} />
+      <FleetPm2 key={host} nodeId={host} />
     </>
   );
 }

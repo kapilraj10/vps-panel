@@ -159,7 +159,8 @@ export function useAction() {
   return useCallback(async (fn, okText) => {
     try {
       const r = await fn();
-      if (okText) toast.ok(typeof okText === 'function' ? okText(r) : okText);
+      const text = typeof okText === 'function' ? okText(r) : okText;
+      if (text) toast.ok(text);
       return r ?? true;
     } catch (err) {
       toast.err(err.message);

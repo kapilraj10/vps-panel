@@ -62,3 +62,24 @@ files, terminal, roles). Status against it. "Tested" means the e2e suites (fake 
 Recommended next order: (a) run `audit-server.sh` + `install-lb.sh --check` on the server and deploy this phase;
 (b) Database manager (Postgres/MySQL: create DB/user, least-privilege grants, native dumps) + per-app backup schedules;
 (c) git deploy pipeline for host apps; (d) 2FA + DEVELOPER/VIEWER roles; (e) file manager + host terminal.
+
+---
+
+## Multi-VPS brief (2026-11-05, second pass): status
+
+| Brief section | Status |
+|---|---|
+| 1 Multi-VPS registry (add/edit/remove, primary, connect/disconnect, test SSH/agent) | ✅ tested (docs/FLEET.md) |
+| 2 Browser SSH console (tabs, resize, reconnect, timeouts, audit, full screen) | ✅ tested |
+| 3 Real-time monitoring per VPS (CPU/per-core/RAM/swap/disks/IO/network/ports/processes/system) | ✅ tested; history per minute + hourly |
+| 4 Network diagnostics (ping, traceroute/tracepath, DNS, TCP, HTTP(S), speed test, matrix) | ✅ tested (speed test not in CI) |
+| 5 Uptime & incidents, alerts | ✅ tested; webhook ✅, email ⬜ (SMTP) |
+| 6 Comparison dashboard | ✅ |
+| 7 Main VPS as control plane, nodes independent | ✅ (agents dial out; apps never depend on the panel) |
+| 8 PM2 across servers | ✅ list/logs/start/stop/restart/reload/delete/flush/save (scale ⬜) |
+| 9 Docker across servers | 🟡 list/logs/start/stop/restart; create/remove/images/compose on remote nodes ⬜ |
+| 10 Cross-server replicas | ⬜ next |
+| 11 Global traffic management | ⬜ (single-host Nginx LB exists; global needs Cloudflare LB or an edge Nginx) |
+| 12 Global backups | ⬜ |
+| 13 App monitoring across servers | 🟡 PM2/Docker status per node; HTTP health of remote apps ⬜ |
+| 16 Agent | ✅ (version reported; self-update ⬜) |
