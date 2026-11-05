@@ -130,7 +130,7 @@ export function startFakeDocker(socketPath, { flags } = {}) {
     fs.rmSync(socketPath, { force: true });
     server.listen(socketPath, () => resolve({
       containers, calls, images, volumes,
-      close: () => new Promise((r) => { for (const c of containers.values()) stop(c); server.close(() => r()); }),
+      close: () => new Promise((r) => { for (const c of containers.values()) stop(c); server.close(() => r()); server.closeAllConnections(); }),
     }));
   });
 }

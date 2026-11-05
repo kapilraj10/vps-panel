@@ -523,7 +523,9 @@ export function createServers({ io, containers, allocator, stacks = null }) {
   }));
 
   // ---------- settings (allocation + alert thresholds) ----------
-  router.get('/settings', requireAdmin, (_req, res) => res.json({ settings: settings.all() }));
+  const WEBHOOK_MASK = 'https://(saved, hidden)';
+  const shown = () => { const a = settings.all(); if (a.notify_webhook_url) a.notify_webhook_url = WEBHOOK_MASK; return a; };
+  router.get('/settings', requireAdmin, (_req, res) => res.json({ settings: shown() }));
   router.put('/settings', requireSuperAdmin, wrap(async (req, res) => {
     const b = req.body ?? {};
     const num = (k, min, max, isInt = false) => {
@@ -541,6 +543,19 @@ export function createServers({ io, containers, allocator, stacks = null }) {
     num('alert_sustain_minutes', 1, 60, true);
     num('terminal_idle_minutes', 1, 240, true);
     num('terminal_max_minutes', 5, 1440, true);
+    num('node_heartbeat_seconds', 5, 300, true);
+    num('node_offline_seconds', 15, 3600, true);
+    num('node_metrics_minute_hours', 6, 24 * 14, true);
+    num('node_metrics_hourly_days', 7, 730, true);
+    num('net_matrix_minutes', 0, 1440, true);
+    num('net_tests_keep_days', 1, 365, true);
+    num('alert_latency_ms', 1, 10_000, true);
+    num('alert_packet_loss', 1, 100, true);
+    if (b.notify_webhook_url !== undefined && b.notify_webhook_url !== WEBHOOK_MASK) {
+      const u = String(b.notify_webhook_url || '').trim();
+      if (u && (!/^https:\/\/[^\s]{4,500}$/.test(u))) throw bad('Webhook URL must start with https://');
+      settings.set('notify_webhook_url', u, req.session.username);
+    }
     if (b.allowed_domain_suffixes !== undefined) {
       const list = Array.isArray(b.allowed_domain_suffixes) ? b.allowed_domain_suffixes.map((s) => String(s).trim().toLowerCase()).filter(Boolean) : null;
       if (!list || list.length > 20 || !list.every((s) => /^(?=.{3,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(s))) throw bad('Domain suffixes must be domain names like gyannportal.com');
@@ -548,7 +563,7 @@ export function createServers({ io, containers, allocator, stacks = null }) {
     }
     allocator.invalidate();
     audit.log({ ...who(req), action: 'settings_update', result: 'success', detail: Object.keys(b).join(', ') });
-    res.json({ settings: settings.all() });
+    res.json({ settings: shown() });
   }));
 
   return { router };

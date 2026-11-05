@@ -306,6 +306,125 @@ const MIGRATIONS = [
       CREATE INDEX app_events_app ON app_events(app_id, id);
     `,
   },
+  {
+    version: 5,
+    name: 'fleet: VPS nodes, agents, metrics (minute + hourly), incidents, network tests, SSH console sessions',
+    sql: `
+      CREATE TABLE nodes (
+        id                INTEGER PRIMARY KEY,
+        uid               TEXT NOT NULL UNIQUE,
+        name              TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        provider          TEXT,
+        location          TEXT,
+        net_zone          TEXT,
+        public_ip         TEXT,
+        private_ip        TEXT,
+        ssh_port          INTEGER NOT NULL DEFAULT 22,
+        ssh_user          TEXT,
+        ssh_key_enc       TEXT,
+        ssh_host_key      TEXT,
+        is_primary        INTEGER NOT NULL DEFAULT 0,
+        maintenance       INTEGER NOT NULL DEFAULT 0,
+        agent_enabled     INTEGER NOT NULL DEFAULT 1,
+        agent_key_hash    TEXT,
+        agent_version     TEXT,
+        enroll_hash       TEXT,
+        enroll_expires_at INTEGER,
+        status            TEXT NOT NULL DEFAULT 'pending',
+        status_since      INTEGER,
+        hostname          TEXT,
+        os                TEXT,
+        kernel            TEXT,
+        arch              TEXT,
+        cpu_model         TEXT,
+        cores             INTEGER,
+        mem_total         INTEGER,
+        first_seen_at     INTEGER,
+        last_heartbeat_at INTEGER,
+        last_seen_ip      TEXT,
+        notes             TEXT,
+        created_by        TEXT,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX nodes_one_primary ON nodes(is_primary) WHERE is_primary = 1;
+      CREATE TABLE node_metrics (
+        node_id    INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+        ts         INTEGER NOT NULL,
+        samples    INTEGER NOT NULL,
+        cpu        REAL, load1 REAL,
+        mem_used   INTEGER, mem_total INTEGER, swap_used INTEGER, swap_total INTEGER,
+        disk_used  INTEGER, disk_total INTEGER,
+        rx         INTEGER, tx INTEGER, io_read INTEGER, io_write INTEGER,
+        connections INTEGER,
+        PRIMARY KEY (node_id, ts)
+      ) WITHOUT ROWID;
+      CREATE TABLE node_metrics_hourly (
+        node_id    INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+        ts         INTEGER NOT NULL,
+        samples    INTEGER NOT NULL,
+        cpu        REAL, cpu_max REAL, load1 REAL,
+        mem_used   INTEGER, mem_total INTEGER, swap_used INTEGER, swap_total INTEGER,
+        disk_used  INTEGER, disk_total INTEGER,
+        rx         INTEGER, tx INTEGER, io_read INTEGER, io_write INTEGER,
+        connections INTEGER,
+        PRIMARY KEY (node_id, ts)
+      ) WITHOUT ROWID;
+      CREATE TABLE node_incidents (
+        id         INTEGER PRIMARY KEY,
+        node_id    INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+        kind       TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        ended_at   INTEGER,
+        detail     TEXT
+      );
+      CREATE INDEX node_incidents_node ON node_incidents(node_id, started_at);
+      CREATE TABLE network_targets (
+        id         INTEGER PRIMARY KEY,
+        host       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        note       TEXT,
+        created_by TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE network_tests (
+        id          INTEGER PRIMARY KEY,
+        run_id      TEXT,
+        kind        TEXT NOT NULL,
+        source_id   INTEGER REFERENCES nodes(id) ON DELETE CASCADE,
+        target_id   INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
+        target      TEXT,
+        params      TEXT,
+        status      TEXT NOT NULL,
+        result      TEXT,
+        error       TEXT,
+        latency     REAL,
+        loss        REAL,
+        by_user     TEXT,
+        started_at  INTEGER NOT NULL,
+        finished_at INTEGER
+      );
+      CREATE INDEX network_tests_time ON network_tests(started_at);
+      CREATE INDEX network_tests_pair ON network_tests(kind, source_id, target_id, started_at);
+      CREATE TABLE terminal_sessions (
+        id         TEXT PRIMARY KEY,
+        user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        username   TEXT NOT NULL,
+        node_id    INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
+        node_name  TEXT,
+        ip         TEXT,
+        started_at INTEGER NOT NULL,
+        ended_at   INTEGER,
+        end_reason TEXT
+      );
+      CREATE TABLE terminal_commands (
+        id         INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES terminal_sessions(id) ON DELETE CASCADE,
+        ts         INTEGER NOT NULL,
+        line       TEXT NOT NULL
+      );
+      CREATE INDEX terminal_commands_session ON terminal_commands(session_id, id);
+    `,
+  },
 ];
 
 function migrate() {
@@ -469,7 +588,17 @@ export const SETTING_DEFAULTS = {
   allowed_domain_suffixes: ['gyannportal.com'], // users may request subdomains of these; others need admin approval anyway
   terminal_idle_minutes: 15,
   terminal_max_minutes: 240,
-};
+  // VPS fleet
+  node_heartbeat_seconds: 15, // agents send facts this often
+  node_offline_seconds: 45, // no heartbeat for this long = not online
+  node_metrics_minute_hours: 48, // per-minute history kept this long, then only hourly averages
+  node_metrics_hourly_days: 90,
+  net_matrix_minutes: 30, // server-to-server ping matrix (0 = off)
+  net_tests_keep_days: 30,
+  alert_latency_ms: 150, // server-to-server latency alert
+  alert_packet_loss: 5, // percent
+  notify_webhook_url: '', // POSTed JSON for every new critical/warning alert (Slack/Discord/ntfy-compatible text field)
+}
 
 export const settings = {
   get(key) {

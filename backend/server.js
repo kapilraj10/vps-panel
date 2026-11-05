@@ -2,6 +2,8 @@ import 'dotenv/config';
 import express from 'express';
 import http from 'node:http';
 import path from 'node:path';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
 import si from 'systeminformation';
@@ -27,6 +29,10 @@ import { createPm2 } from './pm2.js';
 import { createDocker } from './docker.js';
 import { createLoadBalancer } from './loadbalancer.js';
 import { createReplicas } from './replicas.js';
+import { createNodes } from './nodes.js';
+import { createSshConsole } from './sshconsole.js';
+import { createNetTests } from './nettests.js';
+import { createFleetOps } from './fleetops.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -180,8 +186,11 @@ app.use((_req, res, next) => {
 app.use(express.json({ limit: '100kb' }));
 
 const server = http.createServer(app);
+server.on('upgrade', (req, socket, head) => { nodes.handleUpgrade(req, socket, head); });
 const io = new Server(server, {
   maxHttpBufferSize: 256 * 1024,
+  // Agent connections (/agent/v1/connect) are WebSocket upgrades too; Socket.IO must leave them alone
+  destroyUpgrade: false,
   // Block other websites from opening a socket with the user's cookie
   allowRequest: (req, cb) => {
     const origin = req.headers.origin;
@@ -212,7 +221,12 @@ const servers = createServers({ io, containers, allocator, stacks });
 const appsMod = createApps({ io, containers });
 const domains = createDomains({ containers, monitoring });
 const sshKeys = createSshKeys({ containers });
-const usersMod = createUsers({ io, containers, terminal });
+// VPS fleet: nodes + agents, SSH console, network diagnostics, PM2/Docker on every node
+const nodes = createNodes({ io, monitoring });
+const sshConsole = createSshConsole();
+const netTests = createNetTests({ io, nodes, monitoring });
+const fleetOps = createFleetOps({ nodes });
+const usersMod = createUsers({ io, containers, terminal: { closeForUser: (id, why) => { terminal.closeForUser(id, why); sshConsole.closeForUser(id, why); } } });
 // Host infrastructure (the VPS itself): PM2, Docker, replicated apps behind Nginx
 const DATA_DIR = path.dirname(process.env.DB_PATH || path.join(__dirname, 'data', 'panel.db'));
 const pm2Mod = createPm2({ dataDir: DATA_DIR });
@@ -269,6 +283,23 @@ app.post('/api/ingest', (req, res) => {
 });
 
 // Health check for uptime monitors / deploy scripts (no secrets, no login)
+// Agent enrollment is public (a one-time token proves the caller); agents send no cookies or Origin
+app.use('/agent', rateLimit({ perMinute: 30, name: 'agent' }));
+app.use(nodes.publicRouter);
+// Agent download for the installer (open source file, no secrets)
+const AGENT_DIR = path.join(__dirname, '..', 'agent');
+app.get('/agent/v1/kapil-agent.js', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.type('application/javascript').sendFile(path.join(AGENT_DIR, 'kapil-agent.js'));
+});
+// Installer with the agent's checksum baked in, so the server refuses a tampered download
+app.get('/agent/v1/install.sh', (_req, res) => {
+  const agent = fs.readFileSync(path.join(AGENT_DIR, 'kapil-agent.js'));
+  const sum = crypto.createHash('sha256').update(agent).digest('hex');
+  res.set('Cache-Control', 'no-store');
+  res.type('text/x-shellscript').send(fs.readFileSync(path.join(AGENT_DIR, 'install-agent.sh'), 'utf8').replace('__AGENT_SHA256__', sum));
+});
+
 app.get('/healthz', (_req, res) => {
   let dbOk = true;
   try { db.prepare('SELECT 1').get(); } catch { dbOk = false; }
@@ -374,6 +405,7 @@ app.get('/api/overview', (req, res) => {
     pendingDomains: db.prepare("SELECT COUNT(*) AS n FROM domains WHERE status = 'pending'").get().n,
     lxdError: containers.error(),
     terminals: terminal.list().length,
+    consoles: sshConsole.list().length,
     hostApps: replicas.counts(),
   });
 });
@@ -404,6 +436,10 @@ app.use('/api/net', requireAdmin, network.router);
 app.use('/api/pm2', pm2Mod.router);
 app.use('/api/docker', dockerMod.router);
 app.use('/api/infra', replicas.router);
+app.use('/api', nodes.router);
+app.use('/api', sshConsole.router);
+app.use('/api', netTests.router);
+app.use('/api', fleetOps.router);
 app.get('/api/terminals', requireAdmin, (_req, res) => res.json({ terminals: terminal.list() }));
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
@@ -442,6 +478,7 @@ io.on('connection', (socket) => {
     socket.emit('containers:init', s.containers.filter(containers.exists).map(containers.view));
   }
   terminal.attach(socket, ip);
+  sshConsole.attach(socket, ip);
 });
 
 // Drop live sockets whose session expired or was revoked
@@ -463,6 +500,8 @@ backups.start();
 monitoring.start();
 domains.start();
 replicas.start();
+nodes.start();
+netTests.start();
 if (process.env.BACKUP_DISK_CHECK !== 'off') {
   const diskLoop = () => checkBackupDisk().finally(() => setTimeout(diskLoop, BACKUP_DISK_CHECK_MS).unref());
   setTimeout(diskLoop, 20_000).unref();

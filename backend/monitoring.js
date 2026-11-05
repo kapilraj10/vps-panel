@@ -28,6 +28,17 @@ const alertsDb = {
   prune: (before) => db.prepare('DELETE FROM alerts WHERE resolved_at IS NOT NULL AND resolved_at < ?').run(before),
 };
 
+// New alerts go to the optional webhook (Slack / Discord / ntfy / Mattermost understand a JSON "text" field)
+function notify(a) {
+  const url = settings.get('notify_webhook_url');
+  if (!url || !/^https:\/\//.test(url)) return;
+  const text = `[Kapil Cloud] ${a.level.toUpperCase()}: ${a.message}`;
+  fetch(url, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(8000),
+    body: JSON.stringify({ text, content: text, alert: { kind: a.kind, target: a.target, level: a.level, message: a.message, at: a.created_at } }),
+  }).catch((e) => console.error('Alert webhook failed:', e.message));
+}
+
 export function createMonitoring({ io }) {
   const acc = new Map(); // scope -> sums for the current minute
   const over = new Map(); // `${kind}:${target}` -> consecutive minutes over threshold
@@ -51,6 +62,7 @@ export function createMonitoring({ io }) {
     }
     const id = alertsDb.insert({ kind, target, level, message, now: Date.now() });
     const a = alertsDb.get(id);
+    notify(a);
     audit.log({ username: 'system', action: 'alert', target: target || kind, result: level, detail: message });
     emitAlert(a);
   }
