@@ -4,11 +4,15 @@ import { useLive } from '../live.js';
 import { PageHeader, Card, Empty, Icon, Field, Note, useToast, go } from '../ui.jsx';
 import { ServerRow } from './Overview.jsx';
 
-const blank = { name: '', image: 'ubuntu-24.04', cpu: 1, memoryMiB: 1024, diskGiB: 20, ownerId: '', ip: '', ingressMbit: '', egressMbit: '', start: true };
+const blank = { name: '', image: 'ubuntu-24.04', cpu: 1, memoryMiB: 1024, diskGiB: 20, ownerId: '', ip: '', ingressMbit: '', egressMbit: '', start: true, count: 1 };
+const noStack = { pm2: false, docker: false, cloudflared: false, tunnelToken: '' };
 
 export function CreateServer({ open, onClose }) {
   const toast = useToast();
+  const { me } = useLive();
+  const sup = me.role === 'super_admin';
   const [f, setF] = useState(blank);
+  const [st, setSt] = useState(noStack);
   const [images, setImages] = useState([]);
   const [owners, setOwners] = useState([]);
   const [check, setCheck] = useState(null);
@@ -18,6 +22,7 @@ export function CreateServer({ open, onClose }) {
   useEffect(() => {
     if (!open) return;
     setF(blank);
+    setSt(noStack);
     setWarn(null);
     api('/api/images').then((d) => setImages(d.images)).catch(() => {});
     api('/api/users').then((d) => setOwners(d.users.filter((u) => u.role === 'user' && u.status === 'active'))).catch(() => {});
@@ -27,13 +32,17 @@ export function CreateServer({ open, onClose }) {
   useEffect(() => {
     if (!open) return undefined;
     const t = setTimeout(() => {
-      api('/api/allocation/check', { method: 'POST', body: { cpu: Number(f.cpu), memoryMiB: Number(f.memoryMiB), diskGiB: Number(f.diskGiB), ownerId: f.ownerId || undefined } })
+      api('/api/allocation/check', { method: 'POST', body: { cpu: Number(f.cpu), memoryMiB: Number(f.memoryMiB), diskGiB: Number(f.diskGiB), ownerId: f.ownerId || undefined, count: Number(f.count) || 1 } })
         .then(setCheck, (e) => setCheck({ ok: false, errors: [e.message], warnings: [] }));
     }, 300);
     return () => clearTimeout(t);
-  }, [open, f.cpu, f.memoryMiB, f.diskGiB, f.ownerId]);
+  }, [open, f.cpu, f.memoryMiB, f.diskGiB, f.ownerId, f.count]);
 
   const set = (k) => (e) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+  const setS = (k) => (e) => setSt({ ...st, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+  const count = Math.max(1, Number(f.count) || 1);
+  const names = count > 1 ? Array.from({ length: count }, (_, i) => `${f.name || 'name'}-${i + 1}`) : [f.name];
+  const components = ['pm2', 'docker', 'cloudflared'].filter((k) => st[k]);
 
   async function submit(e, acceptWarnings = false) {
     e?.preventDefault();
@@ -41,12 +50,14 @@ export function CreateServer({ open, onClose }) {
     try {
       const body = {
         ...f, cpu: Number(f.cpu), memoryMiB: Number(f.memoryMiB), diskGiB: Number(f.diskGiB), ownerId: f.ownerId ? Number(f.ownerId) : undefined,
-        ip: f.ip || undefined, ingressMbit: f.ingressMbit || undefined, egressMbit: f.egressMbit || undefined, acceptWarnings,
+        ip: f.ip || undefined, ingressMbit: f.ingressMbit || undefined, egressMbit: f.egressMbit || undefined, acceptWarnings, count,
+        stack: components.length ? { components, tunnelToken: st.cloudflared && st.tunnelToken.trim() ? st.tunnelToken.trim() : undefined } : undefined,
       };
+      if (body.stack) body.start = true;
       await api('/api/containers', { method: 'POST', body });
-      toast.info(`Creating ${f.name}. Progress shows on the server page.`);
+      toast.info(count > 1 ? `Creating ${names.join(', ')}. Progress shows on each server.` : `Creating ${f.name}. Progress shows on the server page.`);
       onClose();
-      go(`servers/${f.name}`);
+      go(count > 1 ? 'servers' : `servers/${f.name}`);
     } catch (err) {
       if (err.data?.needsConfirm) setWarn(err.data.warnings);
       else toast.err(err.message);
@@ -77,12 +88,30 @@ export function CreateServer({ open, onClose }) {
           <Field label="Fixed IP (optional)" hint="Inside the LXD bridge subnet; empty = DHCP"><input value={f.ip} onChange={set('ip')} placeholder="10.10.10.30" /></Field>
           <Field label="Download limit Mbit/s (optional)"><input type="number" min={1} value={f.ingressMbit} onChange={set('ingressMbit')} /></Field>
           <Field label="Upload limit Mbit/s (optional)"><input type="number" min={1} value={f.egressMbit} onChange={set('egressMbit')} /></Field>
+          <Field label="How many servers (replicas)" hint={count > 1 ? `Creates ${names.join(', ')}` : 'More than 1 = identical copies named name-1, name-2…'}>
+            <input type="number" min={1} max={5} value={f.count} onChange={set('count')} />
+          </Field>
         </div>
-        <label className="check"><input type="checkbox" checked={f.start} onChange={set('start')} /> Start it after creating</label>
+        {sup && (
+          <fieldset className="stackbox">
+            <legend>Ready stack <span className="muted small">(super admin)</span></legend>
+            <p className="muted small">Installed inside each new server after it starts, then a snapshot <code>stack-ready-…</code> is taken. Everything runs inside the RAM limit above.</p>
+            <label className="check"><input type="checkbox" checked={st.pm2} onChange={setS('pm2')} /> Node.js + PM2 (starts on boot, log rotation)</label>
+            <label className="check"><input type="checkbox" checked={st.docker} onChange={setS('docker')} /> Docker + Compose <span className="muted small">(turns on LXD nesting for this server)</span></label>
+            <label className="check"><input type="checkbox" checked={st.cloudflared} onChange={setS('cloudflared')} /> Cloudflare Tunnel connector (cloudflared)</label>
+            {st.cloudflared && (
+              <Field label="Tunnel token (optional)" hint={count > 1 ? 'Same token on every replica = one tunnel with several connectors (failover). Never stored.' : 'From Zero Trust → Tunnels → your tunnel. Never stored by the panel.'}>
+                <input type="password" value={st.tunnelToken} onChange={setS('tunnelToken')} autoComplete="off" spellCheck={false} placeholder="eyJhIjoi…" />
+              </Field>
+            )}
+            {st.docker && <Note tone="warn">Docker needs nesting, which weakens isolation a little. Only give such servers to people you trust.</Note>}
+          </fieldset>
+        )}
+        <label className="check"><input type="checkbox" checked={f.start || components.length > 0} disabled={components.length > 0} onChange={set('start')} /> Start it after creating</label>
         {check && !check.ok && <Note tone="bad">{check.errors.map((x) => <div key={x}>{x}</div>)}</Note>}
         {check?.ok && check.warnings.length > 0 && <Note tone="warn">{check.warnings.map((x) => <div key={x}>{x}</div>)}</Note>}
         {check?.ok && !check.warnings.length && <Note tone="info">Fits within the host's capacity.</Note>}
-        <p className="muted small">Containers are created unprivileged, without nesting, with the limits above. The first server from an image downloads it (a few minutes).</p>
+        <p className="muted small">Containers are created unprivileged{st.docker ? '' : ', without nesting'}, with a hard RAM limit and the other limits above. The first server from an image downloads it (a few minutes).</p>
         {warn && (
           <Note tone="warn">
             <strong>Please confirm:</strong>
@@ -92,7 +121,7 @@ export function CreateServer({ open, onClose }) {
         )}
         <div className="dialog__buttons">
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn btn--primary" disabled={busy || (check && !check.ok)}>{busy ? 'Creating…' : 'Create server'}</button>
+          <button type="submit" className="btn btn--primary" disabled={busy || (check && !check.ok)}>{busy ? 'Creating…' : count > 1 ? `Create ${count} servers` : 'Create server'}</button>
         </div>
       </form>
     </Dialog>

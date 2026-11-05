@@ -85,16 +85,16 @@ export function createAllocator({ containers, hostCores, hostMem }) {
   }
 
   // Would giving `want` (cpu cores, memory bytes, disk bytes on pool) fit? `exclude` = container being resized.
-  // `forUser` = also check that user's quota.
-  async function check({ cpu, memory, disk, pool, exclude = null, forUser = null }) {
+  // `forUser` = also check that user's quota. `count` = that many identical servers at once (replicas).
+  async function check({ cpu, memory, disk, pool, exclude = null, forUser = null, count = 1 }) {
     const s = await summary();
     const errors = [];
     const warnings = [];
     const old = exclude ? s.containers.find((c) => c.name === exclude) : null;
     const cores = s.host.cores;
     const mem = s.host.memory;
-    const cpuAfter = s.cpu.allocated - (old ? old.cpu ?? cores : 0) + cpu;
-    const memAfter = s.memory.allocated - (old ? old.memory ?? mem : 0) + memory;
+    const cpuAfter = s.cpu.allocated - (old ? old.cpu ?? cores : 0) + cpu * count;
+    const memAfter = s.memory.allocated - (old ? old.memory ?? mem : 0) + memory * count;
     if (cpu > cores) errors.push(`A container cannot have more than the host's ${cores} cores.`);
     if (memory > mem) errors.push('A container cannot have more memory than the host.');
     if (cpuAfter > s.cpu.capacity) {
@@ -112,21 +112,21 @@ export function createAllocator({ containers, hostCores, hostMem }) {
       if (!p) {
         warnings.push('Could not read the storage pool size, so disk space was not checked.');
       } else if (p.capacity != null) {
-        const after = p.allocated - (old?.pool === p.name ? old.disk || 0 : 0) + disk;
+        const after = p.allocated - (old?.pool === p.name ? old.disk || 0 : 0) + disk * count;
         if (after > p.capacity) errors.push(`Not enough disk in pool "${p.name}": ${(after / GiB).toFixed(0)} GiB would be promised but only ${(p.capacity / GiB).toFixed(0)} GiB may be allocated.`);
-        if (p.total != null && p.used != null && disk > p.total - p.used) warnings.push(`Pool "${p.name}" has only ${((p.total - p.used) / GiB).toFixed(0)} GiB actually free right now.`);
+        if (p.total != null && p.used != null && disk * count > p.total - p.used) warnings.push(`Pool "${p.name}" has only ${((p.total - p.used) / GiB).toFixed(0)} GiB actually free right now.`);
       }
     }
     if (forUser) {
       const u = users.byId(forUser);
       if (u) {
         const mine = s.containers.filter((c) => u.containers.includes(c.name) && c.name !== exclude);
-        const add = exclude && u.containers.includes(exclude) ? 0 : 1;
+        const add = exclude && u.containers.includes(exclude) ? 0 : count;
         if (u.max_containers != null && mine.length + add > u.max_containers) errors.push(`${u.username} may have at most ${u.max_containers} server(s).`);
         const sum = (k, own) => mine.reduce((t, c) => t + (c[k] ?? own), 0);
-        if (u.max_cpu != null && sum('cpu', cores) + cpu > u.max_cpu) errors.push(`${u.username}'s CPU quota is ${u.max_cpu} cores in total.`);
-        if (u.max_memory != null && sum('memory', mem) + memory > u.max_memory) errors.push(`${u.username}'s memory quota is ${(u.max_memory / GiB).toFixed(1)} GiB in total.`);
-        if (u.max_disk != null && disk && sum('disk', 0) + disk > u.max_disk) errors.push(`${u.username}'s disk quota is ${(u.max_disk / GiB).toFixed(0)} GiB in total.`);
+        if (u.max_cpu != null && sum('cpu', cores) + cpu * count > u.max_cpu) errors.push(`${u.username}'s CPU quota is ${u.max_cpu} cores in total.`);
+        if (u.max_memory != null && sum('memory', mem) + memory * count > u.max_memory) errors.push(`${u.username}'s memory quota is ${(u.max_memory / GiB).toFixed(1)} GiB in total.`);
+        if (u.max_disk != null && disk && sum('disk', 0) + disk * count > u.max_disk) errors.push(`${u.username}'s disk quota is ${(u.max_disk / GiB).toFixed(0)} GiB in total.`);
       }
     }
     return { ok: errors.length === 0, errors, warnings, pool: p?.name || pool || s.defaultPool, summary: s };

@@ -330,6 +330,74 @@ function SettingsTab({ c, d, reload, busy }) {
   );
 }
 
+const STACK_LABELS = { pm2: 'Node.js + PM2', docker: 'Docker + Compose', cloudflared: 'Cloudflare Tunnel (cloudflared)' };
+
+function StackTab({ c, busy }) {
+  const { me } = useLive();
+  const run = useAction();
+  const confirm = useConfirm();
+  const { data, reload } = useApi(`/api/containers/${encodeURIComponent(c.name)}/stack`);
+  const [sel, setSel] = useState({ pm2: true, docker: false, cloudflared: false });
+  const [token, setToken] = useState('');
+  useEffect(() => { if (!busy) reload(); }, [busy]);
+  const sup = me.role === 'super_admin';
+  const s = data?.stack;
+  const components = Object.keys(sel).filter((k) => sel[k]);
+  const needsRestart = sel.docker && data && !data.nesting;
+
+  const apply = async () => {
+    const typed = await confirm({
+      title: `Set up ${components.map((k) => STACK_LABELS[k]).join(', ')} on ${c.name}?`, typed: c.name, confirmLabel: 'Set up',
+      body: <p>Installs inside the server, then takes a snapshot.{needsRestart && <> <b>Docker turns on nesting and restarts the server</b> (a snapshot is taken before).</>}</p>,
+    });
+    if (!typed) return;
+    await run(() => api(`/api/containers/${c.name}/stack`, { method: 'POST', body: { components, tunnelToken: sel.cloudflared && token.trim() ? token.trim() : undefined, confirm: typed } }), 'Stack setup started');
+    setToken('');
+  };
+
+  if (!data) return <Card><SkeletonRows rows={3} /></Card>;
+  return (
+    <div className="grid2">
+      <Card title="Ready stack" sub={s ? `Last run by ${s.by} · ${dateTime(s.finishedAt || s.startedAt)}` : 'Nothing set up by Kapil Cloud yet'}>
+        {s ? (
+          <>
+            <p>
+              <Badge tone={s.status === 'ready' ? 'good' : s.status === 'failed' ? 'bad' : 'warn'} dot>{s.status}</Badge>{' '}
+              {s.components.map((k) => <Badge key={k}>{STACK_LABELS[k] || k}{s.versions?.[k] ? ` ${s.versions[k]}` : ''}</Badge>)}
+            </p>
+            <dl className="facts">
+              <div><dt>RAM limit</dt><dd>{data.memoryLimit ? bytes(data.memoryLimit) : 'none (set one in Resources)'}</dd></div>
+              <div><dt>Nesting (Docker)</dt><dd>{data.nesting ? 'on' : 'off'}</dd></div>
+              {s.tunnelId && <div><dt>Tunnel</dt><dd><code>{s.tunnelId}</code></dd></div>}
+              {s.snapshot && <div><dt>Snapshot</dt><dd><code>{s.snapshot}</code></dd></div>}
+              <div><dt>Nightly backup</dt><dd>{s.backup === 'included' ? 'included' : s.backup === 'excluded' ? 'excluded in Backups settings' : s.backup === 'unknown' ? 'backup helper not installed' : '–'}</dd></div>
+            </dl>
+            {s.log && <pre className="log mt8">{s.log}</pre>}
+          </>
+        ) : <p className="muted">Use the form to install PM2, Docker or cloudflared inside this server.</p>}
+      </Card>
+      {sup && (
+        <Card title="Set up / update" sub="Safe to run again: installed parts are kept and updated.">
+          {Object.keys(STACK_LABELS).map((k) => (
+            <label key={k} className="check"><input type="checkbox" checked={sel[k]} onChange={(e) => setSel({ ...sel, [k]: e.target.checked })} disabled={k === 'docker' && data.privileged} /> {STACK_LABELS[k]}</label>
+          ))}
+          {sel.cloudflared && (
+            <Field label="Tunnel token (optional)" hint="Never stored. With a token cloudflared runs as a service.">
+              <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" spellCheck={false} />
+            </Field>
+          )}
+          {data.privileged && <Note tone="warn">Docker is not offered on privileged containers.</Note>}
+          {needsRestart && <Note tone="warn">Docker needs nesting: the server will be restarted once.</Note>}
+          {!data.memoryLimit && <Note tone="bad">Set a RAM limit in Resources first.</Note>}
+          <button type="button" className="btn btn--primary mt12" disabled={busy || !components.length || !data.memoryLimit || c.status !== 'Running'} onClick={apply}>
+            {c.status === 'Running' ? 'Set up' : 'Start the server first'}
+          </button>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 export default function ServerDetail({ name, tab }) {
   const { me, cts, jobs } = useLive();
   const c = cts[name];
@@ -350,7 +418,7 @@ export default function ServerDetail({ name, tab }) {
 
   const admin = me.isAdmin;
   const tabs = [['overview', 'Overview'], ['snapshots', 'Snapshots'], ['apps', 'Apps'], ['logs', 'Logs']];
-  if (admin) tabs.push(['resources', 'Resources'], ['settings', 'Settings']);
+  if (admin) tabs.push(['resources', 'Resources'], ['stack', 'Stack'], ['settings', 'Settings']);
   const current = tabs.some(([id]) => id === tab) ? tab : 'overview';
 
   return (
@@ -367,6 +435,7 @@ export default function ServerDetail({ name, tab }) {
       {current === 'apps' && <AppsTab c={c} />}
       {current === 'logs' && <LogsTab c={c} admin={admin} />}
       {current === 'resources' && admin && <ResourcesTab c={c} busy={busy} />}
+      {current === 'stack' && admin && <StackTab c={c} busy={busy} />}
       {current === 'settings' && admin && <SettingsTab c={c} d={d} reload={reload} busy={busy} />}
     </>
   );

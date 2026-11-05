@@ -240,6 +240,11 @@ const MIGRATIONS = [
     name: 'apps: output folder for static sites',
     sql: 'ALTER TABLE apps ADD COLUMN output_dir TEXT;',
   },
+  {
+    version: 3,
+    name: 'servers: ready-stack (PM2, Docker, cloudflared) state',
+    sql: 'ALTER TABLE container_meta ADD COLUMN stack TEXT;',
+  },
 ];
 
 function migrate() {
@@ -436,6 +441,15 @@ export const containerMeta = {
   setProtected: (name, on) => db.prepare(`INSERT INTO container_meta (name, protected, origin, created_at) VALUES (?, ?, 'existing', ?)
     ON CONFLICT(name) DO UPDATE SET protected = excluded.protected`).run(name, on ? 1 : 0, Date.now()),
   setNotes: (name, notes) => db.prepare('UPDATE container_meta SET notes = ? WHERE name = ?').run(notes, name),
+  // Ready-stack state: { components, versions, appliedAt, by, snapshot, status, message } (JSON, no secrets)
+  setStack: (name, stack) => {
+    db.prepare(`INSERT OR IGNORE INTO container_meta (name, protected, origin, created_at) VALUES (?, 1, 'existing', ?)`).run(name, Date.now());
+    db.prepare('UPDATE container_meta SET stack = ? WHERE name = ?').run(stack ? JSON.stringify(stack) : null, name);
+  },
+  stackOf: (name) => {
+    const raw = db.prepare('SELECT stack FROM container_meta WHERE name = ?').get(name)?.stack;
+    try { return raw ? JSON.parse(raw) : null; } catch { return null; }
+  },
   rename: (from, to) => db.prepare('UPDATE container_meta SET name = ? WHERE name = ?').run(to, from),
   remove: (name) => db.prepare('DELETE FROM container_meta WHERE name = ?').run(name),
 };

@@ -321,6 +321,82 @@ test('a plain admin cannot delete servers; super admin can (stopFirst)', async (
   await until(() => !lxd.instances.has('web1-copy'));
 });
 
+// ---------- ready stack / replicas ----------
+const TUNNEL_TOKEN = Buffer.from(JSON.stringify({ a: 'f'.repeat(32), t: '11111111-2222-3333-4444-555555555555', s: 'c2VjcmV0LXNlY3JldC1zZWNyZXQ=' })).toString('base64');
+
+test('ready stack: only a super admin may ask for it; bad tunnel tokens are refused', async () => {
+  const ops = new Client();
+  await ops.login('ops');
+  const body = { name: 'rs', image: 'ubuntu-24.04', cpu: 1, memoryMiB: 256, diskGiB: 5, acceptWarnings: true, stack: { components: ['pm2'] } };
+  assert.equal((await ops.post('/api/containers', body)).status, 403);
+  assert.equal((await ops.post('/api/containers/sachin/stack', { components: ['pm2'], confirm: 'sachin' })).status, 403);
+  assert.equal((await sachin.post('/api/containers/sachin/stack', { components: ['pm2'], confirm: 'sachin' })).status, 403);
+  const bad = await admin.post('/api/containers', { ...body, stack: { components: ['pm2'], tunnelToken: 'not-a-token' } });
+  assert.equal(bad.status, 400);
+  assert.equal((await admin.post('/api/containers', { ...body, stack: { components: ['ftp'] } })).status, 400);
+  assert.equal((await admin.post('/api/containers', { ...body, count: 2, ip: '10.10.10.77' })).status, 400);
+  assert.ok(!lxd.instances.has('rs') && !lxd.instances.has('rs-1'));
+});
+
+test('super admin creates 2 replicas with PM2 + Docker + tunnel: nesting, RAM limit, stack, snapshot', async () => {
+  const r = await admin.post('/api/containers', {
+    name: 'rep', image: 'ubuntu-24.04', cpu: 1, memoryMiB: 512, diskGiB: 5, count: 2, acceptWarnings: true,
+    stack: { components: ['pm2', 'docker'], tunnelToken: TUNNEL_TOKEN },
+  });
+  assert.equal(r.status, 202, JSON.stringify(r.data));
+  assert.deepEqual(r.data.names, ['rep-1', 'rep-2']);
+  for (const n of r.data.names) {
+    const done = await until(async () => {
+      const s = (await admin.get(`/api/containers/${n}/stack`)).data.stack;
+      return s && s.status !== 'running' ? s : null;
+    });
+    assert.equal(done.status, 'ready', JSON.stringify(done));
+    assert.deepEqual(done.components, ['pm2', 'docker', 'cloudflared']);
+    assert.equal(done.versions.pm2, '6.0.0', JSON.stringify(done));
+    assert.equal(done.versions.docker, '27.0.0');
+    assert.equal(done.tunnelId, '11111111-2222-3333-4444-555555555555');
+    assert.match(done.snapshot, /^stack-ready-/);
+    const i = lxd.instances.get(n);
+    assert.equal(i.config['security.nesting'], 'true');
+    assert.equal(i.config['security.privileged'], 'false');
+    assert.equal(i.config['limits.memory'], '512MiB');
+    assert.equal(i.config['user.kapilcloud.replica-of'], 'rep');
+    assert.ok(i.snapshots.some((s) => s.name === done.snapshot));
+    const exec = lxd.calls.find((x) => x.path === `/1.0/instances/${n}/exec` && x.body.environment.WANT_DOCKER);
+    assert.equal(exec.body.environment.WANT_DOCKER, '1');
+    assert.equal(exec.body.environment.CF_TUNNEL_TOKEN, TUNNEL_TOKEN, 'token reaches the container as env only');
+  }
+  const raw = new Database(DB, { readonly: true });
+  const leaks = raw.prepare("SELECT COUNT(*) AS n FROM audit WHERE detail LIKE '%' || ? || '%'").get(TUNNEL_TOKEN.slice(10, 40)).n
+    + raw.prepare("SELECT COUNT(*) AS n FROM container_meta WHERE stack LIKE '%' || ? || '%'").get(TUNNEL_TOKEN.slice(10, 40)).n;
+  raw.close();
+  assert.equal(leaks, 0, 'tunnel token is never stored');
+});
+
+test('stack on an existing server: typed confirm, Docker turns on nesting with a safety snapshot first', async () => {
+  assert.equal((await admin.post('/api/containers/sachin/stack', { components: ['docker'] })).status, 400);
+  const before = lxd.calls.length;
+  const r = await admin.post('/api/containers/sachin/stack', { components: ['docker'], confirm: 'sachin' });
+  assert.equal(r.status, 202, JSON.stringify(r.data));
+  const done = await until(async () => {
+    const s = (await admin.get('/api/containers/sachin/stack')).data.stack;
+    return s && s.status !== 'running' ? s : null;
+  });
+  assert.equal(done.status, 'ready');
+  const i = lxd.instances.get('sachin');
+  assert.equal(i.config['security.nesting'], 'true');
+  assert.equal(i.config['security.syscalls.intercept.mknod'], 'true');
+  assert.ok(i.snapshots.some((s) => s.name.startsWith('before-stack-')));
+  const after = lxd.calls.slice(before);
+  const putIdx = after.findIndex((c) => c.method === 'PUT' && c.path === '/1.0/instances/sachin');
+  const restartIdx = after.findIndex((c) => c.path === '/1.0/instances/sachin/state' && c.body?.action === 'restart');
+  assert.ok(putIdx >= 0 && restartIdx > putIdx, 'config change, then restart');
+  const own = await sachin.get('/api/containers/sachin/stack');
+  assert.equal(own.status, 200);
+  assert.equal(own.data.stack.log, undefined, 'owners see the state, not the install log');
+  assert.equal((await animesh.get('/api/containers/sachin/stack')).status, 403);
+});
+
 // ---------- users ----------
 test('suspending a user ends their sessions and blocks login', async () => {
   const id = (await admin.get('/api/users')).data.users.find((u) => u.username === 'ops').id;

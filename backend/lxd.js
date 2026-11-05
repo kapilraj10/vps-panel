@@ -251,11 +251,13 @@ export async function execStream(name, command, { env = {}, cwd, user = 0, timeo
     if (!fds[fd]) throw new LxdError('LXD did not offer the exec streams');
     socks[fd] = opSocket(p, fds[fd]);
   }
-  await Promise.all(Object.values(socks).map(opened));
+  // Listen before the sockets finish opening: the command starts as soon as the last one connects,
+  // and output sent before a listener is attached would be lost.
   const closed = ['1', '2'].map((fd) => new Promise((resolve) => {
     socks[fd].on('message', (data) => push(Buffer.isBuffer(data) ? data : Buffer.from(data)));
     socks[fd].once('close', resolve);
   }));
+  await Promise.all(Object.values(socks).map(opened));
   const timer = setTimeout(() => {
     try { socks.control.send(JSON.stringify({ command: 'signal', args: {}, signal: 9 })); } catch { /* gone */ }
     push(Buffer.from(`\n[Kapil Cloud] Stopped after ${Math.round(timeoutMs / 60000)} minutes\n`));

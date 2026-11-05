@@ -16,6 +16,7 @@ import { createNetwork } from './network.js';
 import { createMonitoring } from './monitoring.js';
 import { createAllocator } from './resources.js';
 import { createServers } from './servers.js';
+import { createStacks } from './stacks.js';
 import { createTerminal } from './terminal.js';
 import { createApps } from './apps.js';
 import { createDomains } from './domains.js';
@@ -202,7 +203,8 @@ const backups = createBackups({
 });
 const network = createNetwork({ io });
 const terminal = createTerminal({ containers });
-const servers = createServers({ io, containers, allocator });
+const stacks = createStacks({ containers, backupCoverage: (name) => backups.coverage(name) });
+const servers = createServers({ io, containers, allocator, stacks });
 const appsMod = createApps({ io, containers });
 const domains = createDomains({ containers, monitoring });
 const sshKeys = createSshKeys({ containers });
@@ -379,6 +381,7 @@ app.get('/api/audit', requireAdmin, (req, res) => {
 
 // ---------- modules ----------
 app.use('/api', servers.router);
+app.use('/api', stacks.router);
 app.use('/api', usersMod.router);
 app.use('/api', appsMod.router);
 app.use('/api', domains.router);

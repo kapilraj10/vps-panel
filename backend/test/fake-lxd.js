@@ -225,6 +225,13 @@ export function startFakeLxd(socketPath, { instances: initial = {} } = {}) {
     const script = ex.cmd.join(' ');
     let out = `ran ${ex.cmd[0]}\n`;
     if (script.includes('@@COMMIT')) out += `==> Cloning ${ex.env.REPO}\n@@COMMIT ${'a'.repeat(40)}\n==> Deployed\n`;
+    if (ex.env.WANT_PM2 !== undefined) {
+      out += '==> Updating package lists\n';
+      if (ex.env.WANT_PM2 === '1') out += '@@VERSION node v22.0.0\n@@VERSION pm2 6.0.0\n';
+      if (ex.env.WANT_DOCKER === '1') out += '@@VERSION docker 27.0.0\n';
+      if (ex.env.WANT_CLOUDFLARED === '1') out += '@@VERSION cloudflared 2026.1.0\n';
+      out += '==> Ready\n';
+    }
     if (ex.env.OP === 'status') out = '[{"name":"web","pm2_env":{"status":"online","restart_time":0},"monit":{"cpu":1,"memory":1000}}]';
     ex.socks['1'].send(Buffer.from(out));
     setTimeout(() => {

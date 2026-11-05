@@ -535,5 +535,15 @@ export function createBackups({ io, containers, onJobFinished = () => {} }) {
     });
   }));
 
-  return { router, userRouter, start: poll, diskStatus };
+  // Is this container part of the scheduled host backup? (helper config; null when the helper is not installed)
+  async function coverage(name) {
+    try {
+      const config = await helper(['get-config']);
+      if (!config?.targets) return null;
+      const included = config.targets.containers !== false && !(config.containerExclude || []).includes(name);
+      return { included, schedule: config.schedule || null };
+    } catch { return null; }
+  }
+
+  return { router, userRouter, start: poll, diskStatus, coverage };
 }
