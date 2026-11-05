@@ -37,3 +37,28 @@ nothing is tested against the real kapil-server until it is deployed there.
   without approval.
 * Billing stays disabled (admin approval flow) until a provider is configured **and** verified in its sandbox.
 * A feature is "done" only when its buttons do the real thing against the real backend and its tests ran.
+
+---
+
+## Host management brief (2026-11-05): status per phase
+
+The second brief asks for full control of the VPS itself (PM2, Docker, replicas, Nginx, backups, databases, deploys, SSL,
+files, terminal, roles). Status against it. "Tested" means the e2e suites (fake PM2 / Docker / Nginx / LXD), not the real server.
+
+| Brief phase | What exists | Status |
+|---|---|---|
+| 1 Audit | `CLOUD_AUDIT.md` (repo), `system/audit-server.sh` (server report still not run, D2) | ✅ repo · ⬜ server |
+| 2 Schema / migrations | Numbered migrations with pre-migration DB copy; migration 4 = `host_apps`, `app_replicas`, `app_events` | ✅ for what is built |
+| 3 VPS + SSH | Primary node (host metrics, services, LXD servers, SSH keys). Multi-node registry/agent | 🟡 single node |
+| 4 PM2 + Docker | **PM2 Manager** (list/start/stop/restart/reload/delete/scale/logs/flush/save/resurrect/new) and **Docker Manager** (containers + live CPU/RAM, create/start/stop/restart/remove/logs/inspect, images pull/build/remove, volumes, networks, Compose projects) | ✅ tested · ⬜ container exec terminal |
+| 5 Replicas + LB | Primary + replicas as real PM2 processes or Docker containers, conflict-free ports, Nginx upstream with weights / standby / disable, `nginx -t` + reload with rollback, health checks + automatic failover + alerts, rolling restart, Docker rolling update with per-instance rollback, traffic charts from Nginx logs | ✅ tested · needs `system/install-lb.sh` on the server |
+| 6 Backups + DB manager | Backup engine (containers, host files, Docker DB dumps, PM2) existed before. Per-app schedules, S3/SFTP destinations, Postgres/MySQL user + permission manager | 🟡 / ⬜ next |
+| 7 Deploy + rollback | LXD apps: git deploy. Host apps: Docker image rollout with rollback. Git pipeline for host apps (pull → build → test → deploy → health → switch → rollback) | 🟡 next |
+| 8 Domains + SSL | Tunnel routes + DNS + SSL expiry check (LXD apps). Host-app domains via LB `server_name` + tunnel route by hand | 🟡 |
+| 9 Monitoring + terminal | Host + container metrics 7 days, alerts, LXD terminal. File manager, host terminal | 🟡 / ⬜ |
+| 10 Security | Sessions, CSRF, RBAC (super_admin/admin/user), audit, rate limits, encrypted secrets, restricted command runner. TOTP 2FA, DEVELOPER/VIEWER roles, configurable permissions | 🟡 next |
+| 11 Production docs | `docs/HOST_APPS.md` (setup + rollback), `.env.example` | 🟡 |
+
+Recommended next order: (a) run `audit-server.sh` + `install-lb.sh --check` on the server and deploy this phase;
+(b) Database manager (Postgres/MySQL: create DB/user, least-privilege grants, native dumps) + per-app backup schedules;
+(c) git deploy pipeline for host apps; (d) 2FA + DEVELOPER/VIEWER roles; (e) file manager + host terminal.

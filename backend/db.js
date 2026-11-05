@@ -245,6 +245,67 @@ const MIGRATIONS = [
     name: 'servers: ready-stack (PM2, Docker, cloudflared) state',
     sql: 'ALTER TABLE container_meta ADD COLUMN stack TEXT;',
   },
+  {
+    version: 4,
+    name: 'host applications: replicas (PM2 / Docker), Nginx load balancer, events',
+    sql: `
+      CREATE TABLE host_apps (
+        id             INTEGER PRIMARY KEY,
+        name           TEXT NOT NULL UNIQUE,
+        runtime        TEXT NOT NULL CHECK (runtime IN ('pm2', 'docker')),
+        cwd            TEXT,
+        script         TEXT,
+        args           TEXT,
+        image          TEXT,
+        container_port INTEGER,
+        health_path    TEXT NOT NULL DEFAULT '/',
+        env_enc        TEXT,
+        max_memory_mb  INTEGER,
+        cpus           REAL,
+        lb_port        INTEGER UNIQUE,
+        lb_method      TEXT NOT NULL DEFAULT 'weighted' CHECK (lb_method IN ('weighted', 'least_conn')),
+        server_name    TEXT,
+        version        TEXT,
+        op             TEXT,
+        op_status      TEXT,
+        op_message     TEXT,
+        op_at          INTEGER,
+        created_by     TEXT,
+        created_at     INTEGER NOT NULL,
+        updated_at     INTEGER NOT NULL
+      );
+      CREATE TABLE app_replicas (
+        id             INTEGER PRIMARY KEY,
+        app_id         INTEGER NOT NULL REFERENCES host_apps(id) ON DELETE CASCADE,
+        idx            INTEGER NOT NULL,
+        port           INTEGER NOT NULL UNIQUE,
+        weight         INTEGER NOT NULL DEFAULT 1 CHECK (weight BETWEEN 0 AND 100),
+        enabled        INTEGER NOT NULL DEFAULT 1,
+        desired        TEXT NOT NULL DEFAULT 'running' CHECK (desired IN ('running', 'stopped')),
+        version        TEXT,
+        health         TEXT NOT NULL DEFAULT 'unknown',
+        fails          INTEGER NOT NULL DEFAULT 0,
+        oks            INTEGER NOT NULL DEFAULT 0,
+        response_ms    INTEGER,
+        last_check_at  INTEGER,
+        last_change_at INTEGER,
+        last_error     TEXT,
+        created_at     INTEGER NOT NULL,
+        UNIQUE (app_id, idx)
+      );
+      CREATE INDEX app_replicas_app ON app_replicas(app_id);
+      CREATE TABLE app_events (
+        id      INTEGER PRIMARY KEY,
+        app_id  INTEGER NOT NULL REFERENCES host_apps(id) ON DELETE CASCADE,
+        ts      INTEGER NOT NULL,
+        kind    TEXT NOT NULL,
+        level   TEXT NOT NULL DEFAULT 'info',
+        message TEXT NOT NULL,
+        by_user TEXT
+      );
+      CREATE INDEX app_events_app ON app_events(app_id, id);
+    `,
+  },
 ];
 
 function migrate() {

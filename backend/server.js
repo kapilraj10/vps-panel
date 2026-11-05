@@ -23,6 +23,10 @@ import { createDomains } from './domains.js';
 import { createSshKeys } from './sshkeys.js';
 import { createUsers } from './users.js';
 import { HttpError } from './http.js';
+import { createPm2 } from './pm2.js';
+import { createDocker } from './docker.js';
+import { createLoadBalancer } from './loadbalancer.js';
+import { createReplicas } from './replicas.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -209,6 +213,12 @@ const appsMod = createApps({ io, containers });
 const domains = createDomains({ containers, monitoring });
 const sshKeys = createSshKeys({ containers });
 const usersMod = createUsers({ io, containers, terminal });
+// Host infrastructure (the VPS itself): PM2, Docker, replicated apps behind Nginx
+const DATA_DIR = path.dirname(process.env.DB_PATH || path.join(__dirname, 'data', 'panel.db'));
+const pm2Mod = createPm2({ dataDir: DATA_DIR });
+const dockerMod = createDocker();
+const lb = createLoadBalancer();
+const replicas = createReplicas({ io, pm2: pm2Mod, lb, monitoring });
 
 // Backup disk: mounted, free space, SMART (through the root helper, cached)
 async function checkBackupDisk() {
@@ -364,6 +374,7 @@ app.get('/api/overview', (req, res) => {
     pendingDomains: db.prepare("SELECT COUNT(*) AS n FROM domains WHERE status = 'pending'").get().n,
     lxdError: containers.error(),
     terminals: terminal.list().length,
+    hostApps: replicas.counts(),
   });
 });
 
@@ -390,6 +401,9 @@ app.use('/api', monitoring.router);
 app.use('/api/my-backups', backups.userRouter);
 app.use('/api/backups', requireAdmin, backups.router);
 app.use('/api/net', requireAdmin, network.router);
+app.use('/api/pm2', pm2Mod.router);
+app.use('/api/docker', dockerMod.router);
+app.use('/api/infra', replicas.router);
 app.get('/api/terminals', requireAdmin, (_req, res) => res.json({ terminals: terminal.list() }));
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
@@ -448,6 +462,7 @@ containers.start();
 backups.start();
 monitoring.start();
 domains.start();
+replicas.start();
 if (process.env.BACKUP_DISK_CHECK !== 'off') {
   const diskLoop = () => checkBackupDisk().finally(() => setTimeout(diskLoop, BACKUP_DISK_CHECK_MS).unref());
   setTimeout(diskLoop, 20_000).unref();

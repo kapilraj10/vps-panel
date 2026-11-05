@@ -17,6 +17,9 @@ import { Storage, MyBackups, MyNetwork } from './pages/UserPages.jsx';
 import Audit from './Audit.jsx';
 import Backups from './Backups.jsx';
 import Network from './Network.jsx';
+import Pm2Page from './pages/Pm2Page.jsx';
+import DockerPage from './pages/DockerPage.jsx';
+import HostApps from './pages/HostApps.jsx';
 
 const TerminalPage = lazy(() => import('./pages/TerminalPage.jsx'));
 
@@ -27,6 +30,11 @@ const ADMIN_NAV = [
     ['monitoring', 'Monitoring', 'chart'],
     ['network', 'Network', 'network'],
     ['backups', 'Backups', 'backup'],
+  ]],
+  ['Host services', [
+    ['replicas', 'Replicas & LB', 'activity'],
+    ['pm2', 'PM2 Manager', 'cpu'],
+    ['docker', 'Docker Manager', 'storage'],
   ]],
   ['Cloud', [
     ['users', 'Users', 'users'],
@@ -61,7 +69,7 @@ const USER_NAV = [
     ['security', 'Security', 'shield'],
   ]],
 ];
-const ALIASES = { containers: 'servers', 'audit-log': 'audit' };
+const ALIASES = { containers: 'servers', 'audit-log': 'audit', 'load-balancer': 'replicas' };
 
 function ThemeToggle() {
   const [pref, setPref] = useState(getThemePref);
@@ -175,6 +183,9 @@ function Shell() {
     case 'users': body = <UsersPage selected={route[1]} />; break;
     case 'apps': body = <Apps selected={route[1]} />; break;
     case 'domains': body = <Domains />; break;
+    case 'replicas': body = <HostApps selected={route[1]} />; break;
+    case 'pm2': body = <Pm2Page />; break;
+    case 'docker': body = <DockerPage />; break;
     case 'monitoring': body = <Monitoring />; break;
     case 'settings': body = <Settings />; break;
     case 'audit': body = <Audit />; break;
