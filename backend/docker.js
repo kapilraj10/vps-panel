@@ -85,7 +85,7 @@ const summary = (c) => ({
   id: c.Id.slice(0, 12), name: (c.Names?.[0] || '').replace(/^\//, ''), image: c.Image, state: c.State, status: c.Status,
   createdAt: c.Created * 1000, ports: (c.Ports || []).filter((p) => p.PublicPort).map((p) => ({ ip: p.IP, host: p.PublicPort, container: p.PrivatePort, proto: p.Type })),
   compose: c.Labels?.['com.docker.compose.project'] || null, service: c.Labels?.['com.docker.compose.service'] || null,
-  managedApp: c.Labels?.['kapil.cloud.app'] || null,
+  managedApp: c.Labels?.['kapil.cloud.app'] || null, managedDb: c.Labels?.['kapil.cloud.db'] || null,
 });
 
 // Container create body with the safety rules above. Used by the router and by replicas.js.
@@ -95,7 +95,8 @@ export function safeCreateBody({ image, env = {}, ports = [], memoryMb, cpus, vo
   for (const p of ports) {
     const key = `${p.container}/tcp`;
     ExposedPorts[key] = {};
-    PortBindings[key] = [{ HostIp: '127.0.0.1', HostPort: String(p.host) }];
+    // hostIp is only set by the panel itself (databases offered to LXD containers bind to the bridge address)
+    PortBindings[key] = [{ HostIp: p.hostIp || '127.0.0.1', HostPort: String(p.host) }];
   }
   return {
     Image: image, Env: Object.entries(env).map(([k, v]) => `${k}=${v}`), ExposedPorts, Labels: labels,
@@ -185,6 +186,7 @@ export function createDocker() {
     const name = c.Name.replace(/^\//, '');
     if (req.body?.confirm !== name) throw bad(`Type "${name}" exactly to confirm`);
     if (c.Config.Labels?.['kapil.cloud.app']) throw bad('This container is a Kapil Cloud replica. Remove it from the Applications page.');
+    if (c.Config.Labels?.['kapil.cloud.db']) throw bad('This container is a Kapil Cloud database. Remove it from the Databases page.');
     await locks.with(`docker:${id}`, `remove ${name}`, () => dockerRequest('DELETE', `/containers/${id}`, { query: { force: !!req.body.force, v: false } }));
     log(req, 'docker_remove', name, req.body.force ? 'force' : null);
     res.json({ ok: true });
@@ -193,7 +195,7 @@ export function createDocker() {
   router.post('/containers', requireSuperAdmin, wrap(async (req, res) => {
     const b = req.body || {};
     const name = str(b.name, { max: 63, name: 'Name', re: NAME_RE });
-    if (name.startsWith('kc-')) throw bad('Names starting with kc- are reserved for Kapil Cloud replicas');
+    if (name.startsWith('kc-') || name.startsWith('kdb-')) throw bad('Names starting with kc- or kdb- are reserved for Kapil Cloud');
     const image = str(b.image, { max: 255, name: 'Image', re: IMAGE_RE });
     const ports = (Array.isArray(b.ports) ? b.ports : []).slice(0, 20).map((p) => ({
       host: int(p.host, { min: 1024, max: 65535, name: 'Host port' }), container: int(p.container, { min: 1, max: 65535, name: 'Container port' }),

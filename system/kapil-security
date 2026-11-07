@@ -1,0 +1,266 @@
+#!/usr/bin/env node
+// Kapil Cloud security helper. Runs as root through ONE sudoers line (system/kapil-security.sudoers) and nothing else.
+// Installed by system/install-security.sh at /usr/local/sbin/kapil-security. Plain Node, no dependencies.
+//
+// Fixed subcommands only; every argument is validated; every program gets an argument array (never a shell string):
+//   status                                   UFW rules + defaults, fail2ban jails and banned IPs (read only)
+//   check                                    security report: sshd settings, open ports, updates, ... (read only)
+//   ufw-rule allow|deny|limit <port[/proto]> [from] [comment]
+//   ufw-delete <rule number>
+//   ufw-enable                               first allows SSH and the LXD bridge, so enabling can never lock you out
+//   ufw-disable
+//   f2b-ban <jail> <ip> | f2b-unban <jail> <ip>
+// Lock-out guards: the SSH port can never be denied, and the last rule allowing it can never be deleted while UFW is on.
+// Output: one line "@@RESULT <json>" on success; "@@ERROR <message>" on stderr and exit 2 (bad input) or 1 (failure).
+'use strict';
+const fs = require('node:fs');
+const net = require('node:net');
+const { execFileSync } = require('node:child_process');
+
+const PATHS = ['/usr/sbin', '/usr/bin', '/sbin', '/bin'];
+const which = (p) => PATHS.map((d) => `${d}/${p}`).find((f) => fs.existsSync(f)) || null;
+
+class InputError extends Error {}
+
+function run(program, args, { timeout = 30_000, allowFail = false } = {}) {
+  const bin = which(program);
+  if (!bin) { if (allowFail) return { ok: false, out: '', missing: true }; throw new Error(`${program} is not installed`); }
+  try {
+    return { ok: true, out: execFileSync(bin, args, { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: PATHS.join(':'), LANG: 'C' } }) };
+  } catch (e) {
+    if (allowFail) return { ok: false, out: `${e.stdout || ''}${e.stderr || ''}` };
+    throw new Error(`${program} ${args.join(' ')} failed: ${String(e.stderr || e.message).trim().split('\n').pop()}`);
+  }
+}
+
+// ---------- validation ----------
+function port(v) {
+  const m = /^(\d{1,5})(?::(\d{1,5}))?(?:\/(tcp|udp))?$/.exec(String(v || ''));
+  if (!m) throw new InputError('Port must look like 443, 443/tcp or 6000:6100/udp');
+  const a = Number(m[1]);
+  const b = m[2] ? Number(m[2]) : a;
+  if (!(a >= 1 && b <= 65535 && a <= b)) throw new InputError('Port must be 1-65535');
+  if (m[2] && !m[3]) throw new InputError('A port range needs /tcp or /udp');
+  return { spec: m[2] ? `${a}:${b}/${m[3]}` : `${a}${m[3] ? `/${m[3]}` : ''}`, from: a, to: b, proto: m[3] || 'any' };
+}
+function source(v) {
+  if (v === undefined || v === '' || v === 'any') return 'any';
+  const [ip, bits, extra] = String(v).split('/');
+  const fam = net.isIP(ip);
+  if (!fam || extra !== undefined) throw new InputError('Source must be "any", an IP address or a CIDR like 203.0.113.0/24');
+  if (bits !== undefined && (!/^\d{1,3}$/.test(bits) || Number(bits) > (fam === 4 ? 32 : 128))) throw new InputError('Bad CIDR prefix length');
+  return String(v);
+}
+function comment(v) {
+  if (v === undefined || v === '') return null;
+  if (!/^[\w .:-]{1,60}$/.test(v)) throw new InputError('Comment: letters, digits, space, dot, colon, dash, underscore (max 60)');
+  return v;
+}
+const ip = (v) => { if (!net.isIP(String(v || ''))) throw new InputError('Not an IP address'); return String(v); };
+const jail = (v) => { if (!/^[A-Za-z0-9_.-]{1,40}$/.test(String(v || ''))) throw new InputError('Bad jail name'); return String(v); };
+const ruleNum = (v) => { if (!/^\d{1,4}$/.test(String(v || '')) || Number(v) < 1) throw new InputError('Rule number must be 1 or more'); return Number(v); };
+
+// ---------- parsing ----------
+function parseUfwNumbered(text) {
+  const rules = [];
+  for (const line of String(text).split('\n')) {
+    const m = /^\[\s*(\d+)\]\s+(.+?)\s+(ALLOW|DENY|REJECT|LIMIT)(?:\s+(IN|OUT|FWD))?\s+(.+?)\s*(?:#\s*(.*))?$/.exec(line.trimEnd());
+    if (!m) continue;
+    const to = m[2].trim();
+    rules.push({ num: Number(m[1]), to, action: m[3], direction: m[4] || 'IN', from: m[5].trim(), comment: m[6]?.trim() || null, v6: /\(v6\)/.test(to) || /\(v6\)/.test(m[5]) });
+  }
+  return rules;
+}
+function parseUfwVerbose(text) {
+  const t = String(text);
+  const active = /^Status:\s*active/m.test(t);
+  const d = /^Default:\s*(.+)$/m.exec(t)?.[1] || '';
+  const pick = (k) => new RegExp(`(\\w+) \\(${k}\\)`).exec(d)?.[1] || null;
+  return { active, defaults: { incoming: pick('incoming'), outgoing: pick('outgoing'), routed: pick('routed') } };
+}
+function parseJailList(text) {
+  const m = /Jail list:\s*(.*)$/m.exec(String(text));
+  return m ? m[1].split(',').map((s) => s.trim()).filter(Boolean) : [];
+}
+function parseJail(name, text) {
+  const t = String(text);
+  const num = (k) => Number(new RegExp(`${k}:\\s*(\\d+)`).exec(t)?.[1] || 0);
+  const list = /Banned IP list:\s*(.*)$/m.exec(t)?.[1] || '';
+  return { name, failed: num('Currently failed'), totalFailed: num('Total failed'), banned: num('Currently banned'), totalBanned: num('Total banned'), ips: list.split(/\s+/).filter((x) => net.isIP(x)) };
+}
+function parseSshd(text) {
+  const out = {};
+  for (const line of String(text).split('\n')) {
+    const [k, ...rest] = line.trim().split(/\s+/);
+    if (!k) continue;
+    const key = k.toLowerCase();
+    if (key === 'port') (out.ports ??= []).push(Number(rest[0]));
+    else if (['permitrootlogin', 'passwordauthentication', 'pubkeyauthentication', 'kbdinteractiveauthentication', 'maxauthtries', 'x11forwarding', 'permitemptypasswords'].includes(key)) out[key] = rest.join(' ');
+  }
+  return out;
+}
+function parseSs(text) {
+  const out = [];
+  for (const line of String(text).split('\n')) {
+    const f = line.trim().split(/\s+/);
+    if (f.length < 5) continue;
+    const [proto, , , , local, , proc = ''] = f;
+    const i = local.lastIndexOf(':');
+    const addr = local.slice(0, i).replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+    const p = Number(local.slice(i + 1));
+    if (!p) continue;
+    const name = /users:\(\("([^"]+)"/.exec(proc)?.[1] || null;
+    const loopback = addr === '127.0.0.1' || addr === '::1' || addr.startsWith('127.') || addr === 'localhost';
+    out.push({ proto, addr, port: p, process: name, public: !loopback && !/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|fe80)/.test(addr) });
+  }
+  // one row per proto/port/address
+  return [...new Map(out.map((x) => [`${x.proto}|${x.addr}|${x.port}`, x])).values()].sort((a, b) => a.port - b.port);
+}
+
+// ---------- facts ----------
+function sshPorts() {
+  const r = run('sshd', ['-T'], { allowFail: true });
+  const p = r.ok ? parseSshd(r.out).ports : null;
+  return p?.length ? p : [22];
+}
+function bridges() {
+  try { return fs.readdirSync('/sys/class/net').filter((n) => /^lxdbr\d+$/.test(n) || n === 'incusbr0'); } catch { return []; }
+}
+function ufwState() {
+  const v = run('ufw', ['status', 'verbose'], { allowFail: true });
+  if (v.missing) return { installed: false, active: false, defaults: {}, rules: [] };
+  const n = run('ufw', ['status', 'numbered'], { allowFail: true });
+  return { installed: true, ...parseUfwVerbose(v.out), rules: parseUfwNumbered(n.out) };
+}
+function f2bState() {
+  const s = run('fail2ban-client', ['status'], { allowFail: true });
+  if (s.missing) return { installed: false, running: false, jails: [] };
+  if (!s.ok) return { installed: true, running: false, jails: [] };
+  return { installed: true, running: true, jails: parseJailList(s.out).map((j) => parseJail(j, run('fail2ban-client', ['status', j], { allowFail: true }).out)) };
+}
+// Does rule r let the SSH port in?
+const allowsPort = (r, p) => (r.action === 'ALLOW' || r.action === 'LIMIT') && r.direction === 'IN'
+  && (() => { const m = /^(\d+)(?::(\d+))?(?:\/(tcp|udp))?/.exec(r.to); return !!m && m[3] !== 'udp' && Number(m[1]) <= p && p <= Number(m[2] || m[1]); })();
+
+// ---------- commands ----------
+const commands = {
+  status() { return { ufw: ufwState(), fail2ban: f2bState(), sshPorts: sshPorts(), bridges: bridges() }; },
+
+  'ufw-rule'(action, portSpec, from, note) {
+    if (!['allow', 'deny', 'limit'].includes(action)) throw new InputError('Action must be allow, deny or limit');
+    const p = port(portSpec);
+    const src = source(from);
+    const c = comment(note);
+    // Denying SSH for everyone (or a whole network) could lock you out; one single address is fine
+    if (action === 'deny' && (src === 'any' || src.includes('/')) && sshPorts().some((s) => p.from <= s && s <= p.to && p.proto !== 'udp')) {
+      throw new InputError(`Refused: that would block SSH (port ${sshPorts().join(', ')}) and could lock you out. Deny single addresses instead.`);
+    }
+    const args = src === 'any' ? [action, p.spec] : [action, 'from', src, 'to', 'any', 'port', String(p.from === p.to ? p.from : `${p.from}:${p.to}`), ...(p.proto !== 'any' ? ['proto', p.proto] : [])];
+    // UFW stops at the first match: a deny must come before the allows to have any effect
+    const first = action === 'deny' && ufwState().rules.length ? ['insert', '1'] : [];
+    run('ufw', [...first, ...args, ...(c ? ['comment', c] : [])]);
+    return { ok: true, rule: `${action} ${p.spec} from ${src}`, ufw: ufwState() };
+  },
+
+  'ufw-delete'(num) {
+    const n = ruleNum(num);
+    const st = ufwState();
+    const r = st.rules.find((x) => x.num === n);
+    if (!r) throw new InputError(`There is no rule ${n}`);
+    if (st.active) {
+      for (const p of sshPorts()) {
+        if (allowsPort(r, p) && !st.rules.some((x) => x.num !== n && x.v6 === r.v6 && allowsPort(x, p))) {
+          throw new InputError(`Refused: rule ${n} is the last one letting SSH (port ${p}) in. Add another first.`);
+        }
+      }
+    }
+    run('ufw', ['--force', 'delete', String(n)]);
+    return { ok: true, deleted: r, ufw: ufwState() };
+  },
+
+  'ufw-enable'() {
+    const done = [];
+    const st = ufwState();
+    if (!st.installed) throw new Error('ufw is not installed (sudo apt install ufw)');
+    for (const p of sshPorts()) {
+      if (!st.rules.some((r) => allowsPort(r, p))) { run('ufw', ['limit', `${p}/tcp`, 'comment', 'SSH (kapil-cloud)']); done.push(`limit ${p}/tcp (SSH)`); }
+    }
+    // LXD containers get DHCP/DNS from the host and route through it; default-deny would cut them off
+    for (const br of bridges()) {
+      run('ufw', ['allow', 'in', 'on', br, 'comment', `LXD bridge ${br} (kapil-cloud)`]);
+      run('ufw', ['route', 'allow', 'in', 'on', br, 'comment', `LXD ${br} forward (kapil-cloud)`]);
+      run('ufw', ['route', 'allow', 'out', 'on', br, 'comment', `LXD ${br} forward (kapil-cloud)`]);
+      done.push(`allow in/route on ${br}`);
+    }
+    if (!st.active) {
+      run('ufw', ['default', 'deny', 'incoming']);
+      run('ufw', ['default', 'allow', 'outgoing']);
+      run('ufw', ['--force', 'enable']);
+      done.push('enabled (deny incoming, allow outgoing)');
+    }
+    return { ok: true, done, ufw: ufwState() };
+  },
+
+  'ufw-disable'() { run('ufw', ['disable']); return { ok: true, ufw: ufwState() }; },
+
+  'f2b-ban'(j, addr) { run('fail2ban-client', ['set', jail(j), 'banip', ip(addr)]); return { ok: true }; },
+  'f2b-unban'(j, addr) { run('fail2ban-client', ['set', jail(j), 'unbanip', ip(addr)]); return { ok: true }; },
+
+  check() {
+    const checks = [];
+    const add = (id, title, status, detail, fix = null) => checks.push({ id, title, status, detail, fix });
+    const sshd = run('sshd', ['-T'], { allowFail: true });
+    if (sshd.ok) {
+      const s = parseSshd(sshd.out);
+      add('ssh_root', 'SSH root login', s.permitrootlogin === 'no' ? 'ok' : s.permitrootlogin === 'prohibit-password' || s.permitrootlogin === 'without-password' ? 'warn' : 'bad',
+        `PermitRootLogin ${s.permitrootlogin}`, 'Set "PermitRootLogin no" in /etc/ssh/sshd_config, then: sudo systemctl reload ssh');
+      add('ssh_password', 'SSH password login', s.passwordauthentication === 'no' ? 'ok' : 'warn', `PasswordAuthentication ${s.passwordauthentication}`,
+        'Use SSH keys, then set "PasswordAuthentication no" and reload ssh. Keep a working key session open while you test.');
+      add('ssh_empty', 'Empty SSH passwords', s.permitemptypasswords === 'no' ? 'ok' : 'bad', `PermitEmptyPasswords ${s.permitemptypasswords}`, 'Set "PermitEmptyPasswords no"');
+      add('ssh_tries', 'SSH attempts per connection', Number(s.maxauthtries) <= 4 ? 'ok' : 'info', `MaxAuthTries ${s.maxauthtries}`, 'Optional: "MaxAuthTries 3"');
+    } else add('ssh', 'SSH settings', 'info', 'sshd is not installed or could not be read');
+    const u = ufwState();
+    add('ufw', 'Firewall (UFW)', !u.installed ? 'bad' : u.active ? 'ok' : 'bad', !u.installed ? 'not installed' : u.active ? `active, ${u.rules.length} rules, incoming ${u.defaults.incoming}` : 'installed but off',
+      !u.installed ? 'sudo apt install ufw' : u.active ? null : 'Security → Firewall → Turn on');
+    const f = f2bState();
+    add('fail2ban', 'Fail2ban', !f.installed ? 'warn' : f.running ? 'ok' : 'bad', !f.installed ? 'not installed' : f.running ? `${f.jails.length} jails: ${f.jails.map((j) => `${j.name} (${j.banned} banned)`).join(', ')}` : 'installed but not running',
+      !f.installed ? 'sudo apt install fail2ban (the sshd jail is on by default)' : f.running ? null : 'sudo systemctl enable --now fail2ban');
+    const ss = run('ss', ['-tulnpH'], { allowFail: true });
+    const listen = ss.ok ? parseSs(ss.out) : [];
+    const open = listen.filter((x) => x.public);
+    const dockerOpen = open.filter((x) => x.process === 'docker-proxy');
+    add('ports', 'Ports open to the internet', open.length ? 'warn' : 'ok', open.length ? open.map((x) => `${x.port}/${x.proto} ${x.process || '?'} on ${x.addr}`).join(', ') : 'only loopback / private addresses',
+      open.length ? 'Bind apps to 127.0.0.1 and publish them through Cloudflare Tunnel or Nginx, or allow only what is needed in the firewall' : null);
+    if (dockerOpen.length) add('docker_ports', 'Docker ports bypass UFW', 'bad', dockerOpen.map((x) => `${x.port}/${x.proto}`).join(', '), 'Publish Docker ports as 127.0.0.1:<port>:<port>; Docker writes its own iptables rules, UFW does not filter them');
+    const apt = run('apt-get', ['-s', '-o', 'Debug::NoLocking=1', 'upgrade'], { allowFail: true, timeout: 60_000 });
+    if (apt.ok) {
+      const inst = apt.out.split('\n').filter((l) => l.startsWith('Inst '));
+      const sec = inst.filter((l) => /-security/.test(l));
+      add('updates', 'Pending updates', sec.length ? 'bad' : inst.length ? 'warn' : 'ok', `${inst.length} pending, ${sec.length} security`, inst.length ? 'sudo apt update && sudo apt upgrade' : null);
+    }
+    const auto = (() => { try { return fs.readFileSync('/etc/apt/apt.conf.d/20auto-upgrades', 'utf8'); } catch { return ''; } })();
+    add('auto_updates', 'Automatic security updates', /Unattended-Upgrade\s+"1"/.test(auto) ? 'ok' : 'warn', /Unattended-Upgrade\s+"1"/.test(auto) ? 'unattended-upgrades on' : 'off',
+      'sudo apt install unattended-upgrades && sudo dpkg-reconfigure -plow unattended-upgrades');
+    add('reboot', 'Reboot needed', fs.existsSync('/var/run/reboot-required') ? 'warn' : 'ok', fs.existsSync('/var/run/reboot-required') ? 'updates are waiting for a reboot' : 'no', 'Reboot when convenient');
+    return { checks, listening: listen, at: Date.now() };
+  },
+};
+
+function main(argv) {
+  const [cmd, ...args] = argv;
+  const fn = Object.hasOwn(commands, cmd) ? commands[cmd] : null;
+  if (!fn) throw new InputError(`Unknown command. Use one of: ${Object.keys(commands).join(', ')}`);
+  if (args.length > 4 || args.some((a) => String(a).length > 100)) throw new InputError('Too many or too long arguments');
+  return fn(...args);
+}
+
+module.exports = { port, source, comment, ip, jail, ruleNum, parseUfwNumbered, parseUfwVerbose, parseJailList, parseJail, parseSshd, parseSs, allowsPort, main, InputError };
+
+if (require.main === module) {
+  try {
+    process.stdout.write(`@@RESULT ${JSON.stringify(main(process.argv.slice(2)))}\n`);
+  } catch (e) {
+    process.stderr.write(`@@ERROR ${e.message}\n`);
+    process.exit(e instanceof InputError ? 2 : 1);
+  }
+}

@@ -13,9 +13,10 @@ const SCRIPT = path.join(__dirname, '..', 'upgrade-panel.sh');
 // The stand-in panel: reads .env from its working directory like dotenv, and says which version it is.
 const PANEL = (version, { healthy = true } = {}) => `
 const fs = require('fs'), http = require('http');
-const env = Object.fromEntries(fs.readFileSync('.env', 'utf8').split('\\n').filter((l) => l.includes('=')).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+const env = Object.fromEntries(fs.readFileSync(process.env.DOTENV_CONFIG_PATH || '.env', 'utf8').split('\\n').filter((l) => l.includes('=')).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
 ${healthy ? '' : "console.error('boom: broken release'); process.exit(1);"}
-fs.mkdirSync('data', { recursive: true }); fs.appendFileSync('data/panel.db', 'started ${version}\\n');
+const dbFile = env.DB_PATH || 'data/panel.db';
+fs.mkdirSync(require('path').dirname(dbFile), { recursive: true }); fs.appendFileSync(dbFile, 'started ${version}\\n');
 http.createServer((req, res) => {
   if (req.url === '/version') return res.end('${version}');
   if (req.url === '/healthz') return res.end('{"ok":true,"lxd":true}');
@@ -35,10 +36,10 @@ const p = s.procs.find((x) => x.name === name);
 const kill = () => { try { if (p.pid) process.kill(p.pid, 'SIGKILL'); } catch {} p.pid = 0; p.status = 'stopped'; };
 const up = () => {
   const out = fs.openSync(F + '.out', 'a');
-  const c = spawn(process.execPath, [p.script], { cwd: p.cwd, detached: true, stdio: ['ignore', out, out] });
+  const c = spawn(process.execPath, [p.script], { cwd: p.cwd, env: { ...process.env, ...(p.dotenv ? { DOTENV_CONFIG_PATH: p.dotenv } : {}) }, detached: true, stdio: ['ignore', out, out] });
   c.unref(); p.pid = c.pid; p.status = 'online';
 };
-if (cmd === 'jlist') console.log(JSON.stringify(s.procs.map((x) => ({ name: x.name, pm2_env: { pm_cwd: x.cwd, pm_exec_path: x.script, status: x.status } }))));
+if (cmd === 'jlist') console.log(JSON.stringify(s.procs.map((x) => ({ name: x.name, pm2_env: { pm_cwd: x.cwd, pm_exec_path: x.script, status: x.status, DOTENV_CONFIG_PATH: x.dotenv } }))));
 else if (cmd === 'stop') kill();
 else if (cmd === 'restart') { if (p.pid) kill(); up(); }
 else if (cmd === 'logs') console.log('fake log');
@@ -67,7 +68,7 @@ const write = (file, text, mode) => {
   if (mode) fs.chmodSync(file, mode);
 };
 
-async function setup(t, { release = PANEL('new'), envExtra = '' } = {}) {
+async function setup(t, { release = PANEL('new'), envExtra = '', external = false } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'upgrade-test-'));
   const port = await freePort();
   const app = path.join(home, 'vps-panel');
@@ -78,8 +79,12 @@ async function setup(t, { release = PANEL('new'), envExtra = '' } = {}) {
 
   // Old install
   write(path.join(app, 'backend/server.js'), PANEL('old'));
-  write(path.join(app, 'backend/.env'), `PORT=${port}\nHOST=127.0.0.1\nSESSION_SECRET=keep-this-secret\nINGEST_TOKEN=keep-this-token\n${envExtra}`, 0o600);
-  write(path.join(app, 'backend/data/panel.db'), 'old-data\n');
+  const extDir = path.join(home, 'ext');
+  const envFile = external ? path.join(extDir, 'staging.env') : path.join(app, 'backend/.env');
+  const dbFile = external ? path.join(extDir, 'data/panel.db') : path.join(app, 'backend/data/panel.db');
+  const dbLine = external ? `DB_PATH=${dbFile}\nSTAGING_MODE=1\n` : '';
+  write(envFile, `PORT=${port}\nHOST=127.0.0.1\nSESSION_SECRET=keep-this-secret\nINGEST_TOKEN=keep-this-token\n${dbLine}${envExtra}`, 0o600);
+  write(dbFile, 'old-data\n');
   write(path.join(app, 'backend/only-in-old.txt'), 'x');
   write(path.join(app, 'VERSION'), 'old\n');
 
@@ -94,7 +99,7 @@ async function setup(t, { release = PANEL('new'), envExtra = '' } = {}) {
   write(path.join(rel, 'VERSION'), 'new\n');
 
   const state = path.join(home, 'pm2.json');
-  const procs = [{ name: 'vps-panel', cwd: path.join(app, 'backend'), script: path.join(app, 'backend/server.js'), status: 'stopped', pid: 0 },
+  const procs = [{ name: 'vps-panel', cwd: path.join(app, 'backend'), script: path.join(app, 'backend/server.js'), status: 'stopped', pid: 0, dotenv: external ? envFile : undefined },
     { name: 'other-app', cwd: home, script: path.join(home, 'other.js'), status: 'online', pid: 0 }];
   fs.writeFileSync(state, JSON.stringify({ procs }));
 
@@ -116,7 +121,7 @@ async function setup(t, { release = PANEL('new'), envExtra = '' } = {}) {
   await get('/version');
   const pm2Log = () => fs.readFileSync(`${state}.log`, 'utf8');
   const kept = (kind) => fs.readdirSync(home).filter((n) => n.startsWith(`vps-panel.${kind}-`));
-  return { home, port, app, rel, run, get, pm2Log, kept };
+  return { home, port, app, rel, run, get, pm2Log, kept, envFile, dbFile };
 }
 
 const read = (f) => fs.readFileSync(f, 'utf8');
@@ -252,8 +257,42 @@ test('--cleanup needs the typed word, deletes old versions, keeps the saved .env
   assert.equal(fs.readdirSync(path.join(s.home, 'panel-predeploy')).length, 1);
 });
 
-test('refuses a DB_PATH outside backend/data, which rollback could not cover', async (t) => {
-  const s = await setup(t, { envExtra: 'DB_PATH=/var/lib/elsewhere/panel.db\n' });
+test('.env and database outside the panel folder stay there, and upgrade keeps their contents', async (t) => {
+  const s = await setup(t, { external: true });
+  const before = read(s.envFile);
+  const r = s.run();
+  assert.equal(r.status, 0, out(r));
+  assert.equal(await s.get('/version'), 'new');
+  assert.ok(!fs.existsSync(path.join(s.app, 'backend/.env')), 'no second .env appears');
+  assert.ok(!fs.existsSync(path.join(s.app, 'backend/data')), 'no second database appears');
+  assert.match(read(s.envFile), /^STAGING_MODE=1$/m);
+  assert.ok(read(s.envFile).startsWith(before), 'existing settings are unchanged');
+  assert.match(read(s.dbFile), /^old-data$/m);
+  assert.match(read(s.dbFile), /started new/);
+});
+
+test('external database: a broken new version brings the old database back', async (t) => {
+  const s = await setup(t, { external: true, release: PANEL('broken-migrates-then-dies') + 'setTimeout(() => process.exit(1), 300);' });
+  const r = s.run();
+  assert.notEqual(r.status, 0, out(r));
+  assert.match(r.stdout, /old version is running again/);
+  assert.equal(await s.get('/version'), 'old');
+  assert.doesNotMatch(read(s.dbFile), /broken-migrates/);
+});
+
+test('external database: --rollback restores old code, .env and database', async (t) => {
+  const s = await setup(t, { external: true });
+  assert.equal(s.run().status, 0);
+  const env = { ...process.env, HOME: s.home, PATH: `${path.join(s.home, 'bin')}:${process.env.PATH}`, PM2_STATE: path.join(s.home, 'pm2.json'), HEALTH_WAIT: '8', PANEL_DOMAIN: '' };
+  const r = spawnSync('bash', [path.join(s.app, 'system/upgrade-panel.sh'), '--rollback'], { env, input: 'ROLLBACK\n', encoding: 'utf8' });
+  assert.equal(r.status, 0, out(r));
+  assert.equal(await s.get('/version'), 'old');
+  assert.doesNotMatch(read(s.dbFile), /started new/);
+});
+
+test('refuses a DB_PATH folder that contains the panel', async (t) => {
+  const s = await setup(t);
+  fs.appendFileSync(path.join(s.app, 'backend/.env'), `DB_PATH=${path.join(s.home, 'panel.db')}\n`);
   const r = s.run();
   assert.notEqual(r.status, 0);
   assert.match(out(r), /DB_PATH/);

@@ -425,6 +425,38 @@ const MIGRATIONS = [
       CREATE INDEX terminal_commands_session ON terminal_commands(session_id, id);
     `,
   },
+  {
+    version: 6,
+    name: 'databases (Docker PostgreSQL / MySQL / MongoDB), two-factor login',
+    sql: `
+      CREATE TABLE databases (
+        id                INTEGER PRIMARY KEY,
+        name              TEXT NOT NULL UNIQUE,
+        engine            TEXT NOT NULL CHECK (engine IN ('postgres', 'mysql', 'mongo')),
+        version           TEXT NOT NULL,
+        image             TEXT NOT NULL,
+        container         TEXT NOT NULL UNIQUE,
+        volume            TEXT NOT NULL,
+        port              INTEGER NOT NULL UNIQUE,
+        bind_ip           TEXT NOT NULL,
+        db_name           TEXT NOT NULL,
+        db_user           TEXT NOT NULL,
+        password_enc      TEXT NOT NULL,
+        root_password_enc TEXT,
+        memory_mb         INTEGER,
+        status            TEXT NOT NULL,
+        error             TEXT,
+        notes             TEXT,
+        created_by        TEXT,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL
+      );
+      ALTER TABLE users ADD COLUMN totp_secret_enc TEXT;
+      ALTER TABLE users ADD COLUMN totp_enabled_at INTEGER;
+      ALTER TABLE users ADD COLUMN totp_last_step INTEGER;
+      ALTER TABLE users ADD COLUMN totp_recovery TEXT;
+    `,
+  },
 ];
 
 function migrate() {
@@ -509,6 +541,11 @@ export const users = {
   setPassword: (id, passwordHash) => db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(passwordHash, Date.now(), id),
   markLogin: (id, ip) => db.prepare('UPDATE users SET last_login_at = ?, last_login_ip = ? WHERE id = ?').run(Date.now(), ip, id),
   remove: (id) => db.prepare('DELETE FROM users WHERE id = ?').run(id),
+  // Two-factor fields are kept out of userCols, so they never reach a list or a /api/me answer
+  twoFactor: (id) => db.prepare('SELECT totp_secret_enc, totp_enabled_at, totp_last_step, totp_recovery FROM users WHERE id = ?').get(id),
+  setTwoFactor: (id, { secretEnc = null, enabledAt = null, lastStep = null, recovery = null }) => db.prepare(
+    'UPDATE users SET totp_secret_enc = ?, totp_enabled_at = ?, totp_last_step = ?, totp_recovery = ?, updated_at = ? WHERE id = ?',
+  ).run(secretEnc, enabledAt, lastStep, recovery, Date.now(), id),
   countRole: (role) => db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = ? AND status = 'active'").get(role).n,
 };
 
@@ -597,6 +634,7 @@ export const SETTING_DEFAULTS = {
   net_tests_keep_days: 30,
   alert_latency_ms: 150, // server-to-server latency alert
   alert_packet_loss: 5, // percent
+  require_2fa_admins: false, // admins without two-factor login can only reach their account page until they set it up
   notify_webhook_url: '', // POSTed JSON for every new critical/warning alert (Slack/Discord/ntfy-compatible text field)
 }
 

@@ -23,6 +23,8 @@ import HostApps from './pages/HostApps.jsx';
 import Fleet from './pages/Fleet.jsx';
 import NetDiag from './pages/NetDiag.jsx';
 import { Uptime, Compare } from './pages/FleetViews.jsx';
+import Databases from './pages/Databases.jsx';
+import SecurityCenter from './pages/SecurityCenter.jsx';
 
 const ConsolePage = lazy(() => import('./pages/Console.jsx'));
 
@@ -35,7 +37,7 @@ const ADMIN_NAV = [
   ]],
   ['VPS Fleet', [
     ['fleet', 'All servers', 'server'],
-    ['console', 'SSH console', 'terminal'],
+    ['console', 'SSH console / host terminal', 'terminal'],
     ['netdiag', 'Network diagnostics', 'network'],
     ['uptime', 'Uptime', 'activity'],
   ]],
@@ -49,6 +51,7 @@ const ADMIN_NAV = [
     ['replicas', 'Replicas & LB', 'app'],
     ['pm2', 'PM2 Manager', 'cpu'],
     ['docker', 'Docker Manager', 'storage'],
+    ['databases', 'Databases', 'disk'],
   ]],
   ['Cloud', [
     ['users', 'Users', 'users'],
@@ -57,6 +60,7 @@ const ADMIN_NAV = [
     ['terminal', 'Terminal', 'terminal'],
   ]],
   ['Administration', [
+    ['security-center', 'Security center', 'shield'],
     ['audit', 'Audit log', 'audit'],
     ['settings', 'Settings', 'settings'],
   ]],
@@ -188,7 +192,8 @@ function Shell() {
   }
 
   const first = ALIASES[route[0]] || route[0] || 'overview';
-  const page = pages.some(([id]) => id === first) ? first : 'overview';
+  // Admins who must set up two-factor login first only get their Security page
+  const page = me?.mustSetup2fa ? 'security' : pages.some(([id]) => id === first) ? first : 'overview';
   const live = { me, socket, status, cts, jobs, setJobs, alerts, setAlerts, names };
 
   let body;
@@ -205,6 +210,8 @@ function Shell() {
     case 'compare': body = <Compare />; break;
     case 'pm2': body = <Pm2Page />; break;
     case 'docker': body = <DockerPage />; break;
+    case 'databases': body = <Databases />; break;
+    case 'security-center': body = <SecurityCenter tab={route[1] || 'check'} />; break;
     case 'monitoring': body = <Monitoring />; break;
     case 'settings': body = <Settings />; break;
     case 'audit': body = <Audit />; break;

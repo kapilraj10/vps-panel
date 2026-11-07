@@ -497,7 +497,7 @@ export function createNodes({ io, monitoring }) {
   }
 
   return {
-    router, publicRouter, handleUpgrade, start, call, view, summary,
+    router, publicRouter, handleUpgrade, start, call, view, summary, emitNode: emit,
     isConnected: (id) => live.has(Number(id)), facts: (id) => live.get(Number(id))?.facts || null,
     list: () => nodesDb.all(), get: (id) => nodesDb.get(Number(id)),
     // for tests

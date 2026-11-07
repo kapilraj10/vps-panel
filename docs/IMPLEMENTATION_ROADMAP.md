@@ -83,3 +83,18 @@ Recommended next order: (a) run `audit-server.sh` + `install-lb.sh --check` on t
 | 12 Global backups | ⬜ |
 | 13 App monitoring across servers | 🟡 PM2/Docker status per node; HTTP health of remote apps ⬜ |
 | 16 Agent | ✅ (version reported; self-update ⬜) |
+
+---
+
+## Platform brief (2026-11-07): status
+
+| Item | Status |
+|---|---|
+| Server count 0 / backups not running on cloude | cause: `STAGING_MODE=1` in its .env (containers, backups, monitoring off). Fix = remove it on the server |
+| Master server, location Kathmandu | ✅ one-click setup (docs/PLATFORM.md) |
+| Databases: PostgreSQL / MySQL / MongoDB from the panel | ✅ tested (Docker on the master; in daily backups) |
+| Host terminal | ✅ via SSH console to the master (panel key, audited) |
+| Firewall (UFW) manager | ✅ tested with a fake helper; real UFW ⬜ on the server |
+| Fail2ban + panel login blocks | ✅ tested (fake helper) |
+| 2FA (TOTP + recovery codes + require for admins) | ✅ tested |
+| Security check page | ✅ tested (fake helper) |

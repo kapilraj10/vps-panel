@@ -72,7 +72,7 @@ export function createUsers({ io, containers, terminal }) {
     const t = target(req);
     res.set('Cache-Control', 'no-store');
     res.json({
-      user: { ...t, usage: usage(t) },
+      user: { ...t, usage: usage(t), twoFactor: !!users.twoFactor(t.id)?.totp_enabled_at },
       activity: audit.forUser(t.username, t.containers, 100),
       sessions: sessions.listForUser(t.id).map((s) => ({ id: sessionId(s.token_hash), createdAt: s.created_at, lastSeenAt: s.last_seen_at, ip: s.ip, userAgent: s.user_agent })),
     });

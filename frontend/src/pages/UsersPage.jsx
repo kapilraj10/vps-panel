@@ -81,8 +81,15 @@ function UserForm({ open, onClose, user, containers, onSaved }) {
 }
 
 function UserDetail({ id, onClose }) {
-  const { data, error } = useApi(`/api/users/${id}`);
+  const { me } = useLive();
+  const run = useAction();
+  const confirm = useConfirm();
+  const { data, error, reload } = useApi(`/api/users/${id}`);
   const u = data?.user;
+  async function reset2fa() {
+    const typed = await confirm({ title: `Reset two-factor for ${u.username}?`, body: 'Use this when they lost their phone. They are logged out everywhere and can log in with the password only, then set it up again.', typed: u.username, danger: true, confirmLabel: 'Reset' });
+    if (typed && await run(() => api(`/api/users/${u.id}/2fa/reset`, { method: 'POST', body: { confirm: typed } }), `Two-factor reset for ${u.username}`)) reload();
+  }
   return (
     <Dialog open title={u ? `${u.username}${u.full_name ? ` · ${u.full_name}` : ''}` : 'User'} onClose={onClose} wide>
       <ErrorNote error={error} />
@@ -93,6 +100,7 @@ function UserDetail({ id, onClose }) {
             <div><dt>Status</dt><dd>{u.status}</dd></div>
             <div><dt>Last login</dt><dd>{u.last_login_at ? `${dateTime(u.last_login_at)} from ${u.last_login_ip}` : 'never'}</dd></div>
             <div><dt>Servers</dt><dd>{u.containers.join(', ') || 'none'}</dd></div>
+            <div><dt>Two-factor</dt><dd>{u.twoFactor ? <Badge tone="good">on</Badge> : <Badge>off</Badge>} {u.twoFactor && me.role === 'super_admin' && u.id !== me.id && <button type="button" className="btn btn--small" onClick={reset2fa}>Reset</button>}</dd></div>
             <div><dt>Memory in use</dt><dd>{bytes(u.usage.memUsed)} of {bytes(u.usage.memLimit)}</dd></div>
             <div><dt>Disk in use</dt><dd>{bytes(u.usage.diskUsed)} of {bytes(u.usage.diskLimit)}</dd></div>
           </dl>

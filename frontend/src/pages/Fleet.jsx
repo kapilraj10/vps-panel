@@ -71,10 +71,44 @@ function NodeForm({ node, onClose, onSaved }) {
   );
 }
 
+function MasterSetup({ onClose, onDone, primary }) {
+  const run = useAction();
+  const [location, setLocation] = useState(primary?.location || 'Kathmandu');
+  const [r, setR] = useState(null);
+  async function submit(e) {
+    e.preventDefault();
+    const out = await run(() => api('/api/fleet/master/setup', { method: 'POST', body: { location } }));
+    if (out) { setR(out); onDone(); }
+  }
+  return (
+    <Dialog open title="Set up this server as the master" onClose={onClose} wide>
+      {!r ? (
+        <form className="form" onSubmit={submit}>
+          <p>Registers the server this panel runs on as the primary server{primary ? ` (${primary.name})` : ''}, and lets the panel's SSH key log in to it as the panel's own user, so super admins get a host terminal in the SSH console.</p>
+          <Field label="Location"><input value={location} onChange={(e) => setLocation(e.target.value)} maxLength={80} /></Field>
+          <Note>The key is added to a marked block in that user's <code>~/.ssh/authorized_keys</code> (other keys stay). Remove the block to revoke it. Every console session and command is recorded.</Note>
+          <div className="dialog__buttons"><button type="button" className="btn" onClick={onClose}>Cancel</button><button type="submit" className="btn btn--primary">Set up</button></div>
+        </form>
+      ) : (
+        <div className="form">
+          <p><Badge tone="good">{r.node.name}</Badge> is the primary server{r.node.location ? ` in ${r.node.location}` : ''}. Panel key {r.keyAdded ? 'added to' : 'already in'} <code>{r.keyFile}</code>.</p>
+          {r.ssh.ok ? <Note>SSH works ({r.ssh.output.split('\n')[0]}). Host key pinned. <a href={href(`console?node=${r.node.id}`)}>Open the host terminal</a></Note>
+            : <Note tone="warn">SSH test failed: {r.ssh.error}. Check that sshd runs on 127.0.0.1:{r.node.ssh_port} and allows key login, then use “Test SSH” on the server's SSH tab.</Note>}
+          <p className="small">For live CPU / RAM / disk graphs, install the agent on this server too (Install agent on its page gives the one-time token):</p>
+          <pre className="logbox mono">{r.agentCommand}</pre>
+          <div className="dialog__buttons"><a className="btn" href={href(`fleet/${r.node.id}`)}>Open server</a><button type="button" className="btn btn--primary" onClick={onClose}>Done</button></div>
+        </div>
+      )}
+    </Dialog>
+  );
+}
+
 export function FleetList() {
   const { me } = useLive();
   const sup = me.role === 'super_admin';
   const { nodes, data, error, reload } = useNodes();
+  const [mastering, setMastering] = useState(false);
+  const primary = nodes.find((n) => n.is_primary);
   const [q, setQ] = useState('');
   const [status, setStatus] = useState('all');
   const [adding, setAdding] = useState(() => window.location.hash.includes('?new'));
@@ -86,7 +120,11 @@ export function FleetList() {
   return (
     <>
       <PageHeader title="VPS Fleet" sub="Every registered server, measured by its own agent"
-        actions={sup && <button type="button" className="btn btn--primary" onClick={() => setAdding(true)}><Icon name="plus" /> Add server</button>} />
+        actions={sup && <>
+          <button type="button" className="btn" onClick={() => setMastering(true)}><Icon name="server" /> {primary?.ssh_host_key ? 'Master server' : 'Set up master server'}</button>
+          <button type="button" className="btn btn--primary" onClick={() => setAdding(true)}><Icon name="plus" /> Add server</button>
+        </>} />
+      {mastering && <MasterSetup primary={primary} onClose={() => setMastering(false)} onDone={reload} />}
       <div className="kpis">
         <Stat label="Servers" icon="server" value={data ? nodes.length : null} sub={data ? `${up.length} online · ${nodes.length - up.length} not online` : ''} tone={nodes.some((n) => ['offline', 'unreachable'].includes(n.status)) ? 'bad' : ''} />
         <Stat label="CPU cores" icon="cpu" value={data ? withLive.reduce((s, n) => s + (n.live.cores || 0), 0) : null} sub="reported by agents" />

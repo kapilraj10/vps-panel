@@ -78,6 +78,7 @@ export function startFakeLxd(socketPath, { instances: initial = {} } = {}) {
         return Promise.race([op.done, new Promise((r) => setTimeout(r, t))]).then(() => ok(res, { ...op, done: undefined }));
       }
       if (p === '/1.0/profiles/default') return ok(res, profile);
+      if (p === '/1.0/networks') return ok(res, [{ name: 'lxdbr0', type: 'bridge', managed: true, config: { 'ipv4.address': '10.10.10.1/24' } }]);
       if (p === '/1.0/networks/lxdbr0') return ok(res, { name: 'lxdbr0', managed: true, config: { 'ipv4.address': '10.10.10.1/24' } });
       if (p === '/1.0/networks/lxdbr0/leases') return ok(res, [...instances.values()].map((i) => ({ address: i.ip, hostname: i.name })));
       if (p === '/1.0/storage-pools' && url.searchParams.get('recursion')) return ok(res, [{ name: 'default', driver: 'zfs', status: 'Created' }]);

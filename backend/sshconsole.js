@@ -101,8 +101,8 @@ export function createSshConsole() {
   });
 
   // Test SSH: connect, pin the host key (first time), run a fixed read-only command
-  router.post('/nodes/:id/ssh/test', requireSuperAdmin, wrap(async (req, res) => {
-    const n = getNode(req.params.id);
+  async function testNode(id) {
+    const n = getNode(id);
     const t0 = Date.now();
     let conn;
     try {
@@ -111,13 +111,20 @@ export function createSshConsole() {
       const first = !n.ssh_host_key;
       if (first) db.prepare('UPDATE nodes SET ssh_host_key = ? WHERE id = ?').run(r.hostKey, n.id);
       const out = await execOnce(conn, 'uname -srm; . /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"; uptime');
-      log(req, 'node_ssh_test', n.name, first ? `host key pinned ${r.hostKey}` : 'ok');
-      res.json({ ok: true, ms: Date.now() - t0, hostKey: r.hostKey, pinnedNow: first, output: out.out.trim() });
+      return { ok: true, ms: Date.now() - t0, hostKey: r.hostKey, pinnedNow: first, output: out.out.trim() };
+    } finally {
+      conn?.end();
+    }
+  }
+  router.post('/nodes/:id/ssh/test', requireSuperAdmin, wrap(async (req, res) => {
+    const n = getNode(req.params.id);
+    try {
+      const r = await testNode(n.id);
+      log(req, 'node_ssh_test', n.name, r.pinnedNow ? `host key pinned ${r.hostKey}` : 'ok');
+      res.json(r);
     } catch (e) {
       log(req, 'node_ssh_test', n.name, e.message, 'failure');
       throw e;
-    } finally {
-      conn?.end();
     }
   }));
 
@@ -278,5 +285,5 @@ export function createSshConsole() {
   const closeForUser = (userId, reason) => { for (const t of [...open.values()]) if (t.userId === userId) finish(t, reason); };
   const list = () => [...open.values()].map((t) => ({ id: t.id, node: t.nodeName, username: t.username, startedAt: t.startedAt, attached: !!t.socket }));
 
-  return { router, attach, closeForUser, list };
+  return { router, attach, closeForUser, list, test: testNode, publicKey: () => panelKey().public };
 }

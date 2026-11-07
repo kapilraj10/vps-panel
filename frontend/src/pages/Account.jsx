@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import QRCode from 'qrcode';
 import { api, ago, dateTime } from '../lib.jsx';
 import { useLive } from '../live.js';
 import { PageHeader, Card, Badge, Empty, SkeletonRows, ErrorNote, Field, Icon, Note, useApi, useAction, useConfirm } from '../ui.jsx';
@@ -53,15 +54,104 @@ const shortUa = (ua) => {
   return `${b}${os ? ` on ${os}` : ''}`;
 };
 
+function RecoveryCodes({ codes, onDone }) {
+  const text = codes.join('\n');
+  return (
+    <div className="form">
+      <Note tone="warn">Save these recovery codes now (password manager or paper). Each works once if you lose your phone. They are not shown again.</Note>
+      <pre className="logbox mono">{text}</pre>
+      <div className="row-actions">
+        <button type="button" className="btn" onClick={() => navigator.clipboard?.writeText(text)}><Icon name="copy" size={14} /> Copy</button>
+        <a className="btn" download="kapil-cloud-recovery-codes.txt" href={`data:text/plain;charset=utf-8,${encodeURIComponent(text)}`}>Download</a>
+        <button type="button" className="btn btn--primary" onClick={onDone}>I saved them</button>
+      </div>
+    </div>
+  );
+}
+
+export function TwoFactorCard() {
+  const run = useAction();
+  const st = useApi('/api/me/2fa');
+  const [pw, setPw] = useState('');
+  const [setup, setSetup] = useState(null);
+  const [qr, setQr] = useState('');
+  const [code, setCode] = useState('');
+  const [codes, setCodes] = useState(null);
+  const [off, setOff] = useState(false);
+  useEffect(() => { if (setup?.uri) QRCode.toDataURL(setup.uri, { margin: 1, width: 200 }).then(setQr).catch(() => setQr('')); }, [setup]);
+  const d = st.data;
+  async function start(e) {
+    e.preventDefault();
+    const r = await run(() => api('/api/me/2fa/setup', { method: 'POST', body: { password: pw } }));
+    if (r) { setSetup(r); setPw(''); }
+  }
+  async function enable(e) {
+    e.preventDefault();
+    const r = await run(() => api('/api/me/2fa/enable', { method: 'POST', body: { code } }), 'Two-factor login is on. Other devices were logged out.');
+    if (r) { setCodes(r.recoveryCodes); setSetup(null); setCode(''); st.reload(); }
+  }
+  async function disable(e) {
+    e.preventDefault();
+    if (await run(() => api('/api/me/2fa/disable', { method: 'POST', body: { password: pw, code } }), 'Two-factor login is off')) { setOff(false); setPw(''); setCode(''); st.reload(); }
+  }
+  async function newCodes(e) {
+    e.preventDefault();
+    const r = await run(() => api('/api/me/2fa/recovery', { method: 'POST', body: { password: pw, code } }), 'New recovery codes made; the old ones stop working');
+    if (r) { setCodes(r.recoveryCodes); setPw(''); setCode(''); setOff(false); st.reload(); }
+  }
+  return (
+    <Card title="Two-factor login" sub="After your password, a 6-digit code from an app on your phone">
+      <ErrorNote error={st.error} />
+      {!d ? <SkeletonRows rows={2} /> : codes ? <RecoveryCodes codes={codes} onDone={() => setCodes(null)} /> : d.enabled ? (
+        <>
+          <p><Badge tone="good" dot>On</Badge> <span className="muted">since {dateTime(d.enabledAt)} · {d.recoveryLeft} recovery codes left</span></p>
+          {!off ? (
+            <div className="row-actions">
+              <button type="button" className="btn" onClick={() => setOff('codes')}>New recovery codes</button>
+              {!d.required && <button type="button" className="btn btn--danger" onClick={() => setOff('disable')}>Turn off</button>}
+            </div>
+          ) : (
+            <form className="form" onSubmit={off === 'codes' ? newCodes : disable}>
+              <div className="fgrid">
+                <Field label="Password"><input required type="password" autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} /></Field>
+                <Field label="Code from the app"><input required inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value.trim())} /></Field>
+              </div>
+              <div className="row-actions"><button type="button" className="btn" onClick={() => setOff(false)}>Cancel</button>
+                <button type="submit" className={`btn ${off === 'disable' ? 'btn--danger' : 'btn--primary'}`}>{off === 'disable' ? 'Turn off two-factor' : 'Make new codes'}</button></div>
+            </form>
+          )}
+        </>
+      ) : setup ? (
+        <form className="form" onSubmit={enable}>
+          <p>1. Scan this with Google Authenticator, Authy, 1Password or similar:</p>
+          {qr ? <img src={qr} width={200} height={200} alt="QR code for the authenticator app" style={{ background: '#fff', borderRadius: 8 }} /> : null}
+          <p className="small">Or type this key: <code className="mono">{setup.secret}</code></p>
+          <Field label="2. Enter the 6-digit code it shows"><input required autoFocus inputMode="numeric" pattern="\d{6}" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value.trim())} /></Field>
+          <div className="row-actions"><button type="button" className="btn" onClick={() => setSetup(null)}>Cancel</button><button type="submit" className="btn btn--primary">Turn on</button></div>
+        </form>
+      ) : (
+        <form className="form" onSubmit={start}>
+          <p><Badge tone="bad" dot>Off</Badge> {d.required && <strong className="bad">Required for admins: set it up to use the panel.</strong>}</p>
+          <Field label="Confirm your password to start"><input required type="password" autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} /></Field>
+          <div><button type="submit" className="btn btn--primary"><Icon name="lock" size={14} /> Set up two-factor login</button></div>
+        </form>
+      )}
+    </Card>
+  );
+}
+
 export function Security() {
+  const { me } = useLive();
   const run = useAction();
   const confirm = useConfirm();
-  const sessions = useApi('/api/me/sessions');
-  const activity = useApi('/api/me/activity');
+  const sessions = useApi(me.mustSetup2fa ? null : '/api/me/sessions');
+  const activity = useApi(me.mustSetup2fa ? null : '/api/me/activity');
   const others = (sessions.data?.sessions || []).filter((s) => !s.current).length;
   return (
     <>
       <PageHeader title="Security" sub="Where you are signed in, and what happened on your account" />
+      {me.mustSetup2fa && <Note tone="warn">Two-factor login is required for admins. Set it up below; the rest of the panel opens right after.</Note>}
+      <TwoFactorCard />
       <Card title="Active sessions" actions={others > 0 && (
         <button type="button" className="btn btn--small btn--danger" onClick={async () => {
           if (await confirm({ title: 'Log out all other sessions?', danger: true, confirmLabel: 'Log them out' })) {
