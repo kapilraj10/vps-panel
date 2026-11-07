@@ -135,6 +135,8 @@ This exact path is tested: `npm test` starts from a database in the **old** sche
 
 ## 5. Deploying to kapil-server
 
+**Easiest: [UPGRADE.md](UPGRADE.md)** (built release + `system/upgrade-panel.sh`, with automatic rollback). The manual git steps below do the same by hand.
+
 Run these **one at a time** as `kapil` on the server. Nothing here touches Nginx, SSH, the firewall or containers.
 
 ```bash
