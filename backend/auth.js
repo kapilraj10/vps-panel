@@ -1,7 +1,7 @@
 // Sessions, login rate limiting and CSRF checks.
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
-import { sessions } from './db.js';
+import { sessions, isAdminRole } from './db.js';
 
 const SESSION_SECRET = process.env.SESSION_SECRET || '';
 if (SESSION_SECRET.length < 32) {
@@ -43,14 +43,20 @@ export function parseCookies(header = '') {
 export function sessionFromHeader(cookieHeader) {
   const token = parseCookies(cookieHeader)[COOKIE_NAME];
   if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
-  return sessions.find(hashToken(token)) || null;
+  const s = sessions.find(hashToken(token)) || null;
+  // "Last active" for the Security page; written at most once a minute per session
+  if (s && (!s.last_seen_at || Date.now() - s.last_seen_at > 60_000)) sessions.touch(s.token_hash);
+  return s;
 }
 
-export function startSession(res, userId) {
+// Short, non-secret id for a session (shown on the Security page instead of the token hash)
+export const sessionId = (tokenHash) => tokenHash.slice(0, 16);
+
+export function startSession(res, userId, meta = {}) {
   const token = crypto.randomBytes(32).toString('base64url');
   const csrf = crypto.randomBytes(32).toString('base64url');
   const tokenHash = hashToken(token);
-  sessions.create(tokenHash, userId, csrf, SESSION_MS);
+  sessions.create(tokenHash, userId, csrf, SESSION_MS, meta);
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true, secure: COOKIE_SECURE, sameSite: 'strict', path: '/', maxAge: SESSION_MS,
   });
@@ -74,9 +80,20 @@ export function requireAuth(req, res, next) {
   return res.redirect(302, '/login');
 }
 
+// ---------- role checks (RBAC). The role always comes from the DB via the session join. ----------
+export const isAdmin = (s) => !!s && isAdminRole(s.role);
+export const isSuperAdmin = (s) => s?.role === 'super_admin';
+// Containers this session may touch: admins all, users only those assigned to them
+export const ownsContainer = (s, name) => isAdmin(s) || (!!s && s.containers.includes(name));
+
 export function requireAdmin(req, res, next) {
-  if (req.session?.role === 'admin') return next();
+  if (isAdmin(req.session)) return next();
   return res.status(403).json({ error: 'Admins only' });
+}
+
+export function requireSuperAdmin(req, res, next) {
+  if (isSuperAdmin(req.session)) return next();
+  return res.status(403).json({ error: 'Only a super admin can do this' });
 }
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -118,7 +135,32 @@ export const loginLimit = {
   fail(ip) { failures.set(ip, [...recent(ip), Date.now()]); },
 };
 
+// ---------- general API rate limit: requests per minute per session (or IP before login) ----------
+const buckets = new Map(); // key -> { start, n }
+export function rateLimit({ perMinute, key = (req) => req.session?.token_hash || clientIp(req), name = 'api' }) {
+  return (req, res, next) => {
+    const k = `${name}:${key(req)}`;
+    const now = Date.now();
+    let b = buckets.get(k);
+    if (!b || now - b.start >= 60_000) { b = { start: now, n: 0 }; buckets.set(k, b); }
+    b.n += 1;
+    if (b.n > perMinute) {
+      res.set('Retry-After', String(Math.ceil((b.start + 60_000 - now) / 1000)));
+      return res.status(429).json({ error: 'Too many requests. Slow down and try again in a minute.' });
+    }
+    return next();
+  };
+}
+
+export const safeEqual = (a, b) => {
+  const x = Buffer.from(String(a));
+  const y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+};
+
 setInterval(() => {
+  const now = Date.now();
+  for (const [k, b] of buckets) if (now - b.start >= 60_000) buckets.delete(k);
   for (const ip of failures.keys()) recent(ip);
   sessions.purgeExpired();
 }, 10 * 60_000).unref();

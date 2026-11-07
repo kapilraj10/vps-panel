@@ -160,7 +160,7 @@ function settingsDiff(before, after) {
   return parts.length ? `changed: ${parts.join('; ')}` : 'no changes';
 }
 
-export function createBackups({ io, containers }) {
+export function createBackups({ io, containers, onJobFinished = () => {} }) {
   const emit = (event, data) => io.to('admin').emit(event, data);
   const seen = new Map(); // id -> mtime of its job file when last read
   const live = new Map(); // id -> raw job record, while running
@@ -193,6 +193,7 @@ export function createBackups({ io, containers }) {
     } else if (row.status === 'failed') {
       audit.log({ username, action: 'backup_fail', target: row.id, result: 'failure', detail: row.error });
     }
+    if (row.status !== 'running') onJobFinished(row);
     backupJobs.setAudited(row.id, row.status);
   }
 
@@ -509,5 +510,40 @@ export function createBackups({ io, containers }) {
     res.status(err.status || 500).json({ error: err.message || 'Backup request failed' });
   });
 
-  return { router, start: poll };
+  // ---------- user view: backup runs that contain one of the user's own servers (read-only) ----------
+  const userRouter = express.Router();
+  userRouter.get('/', wrap(async (req, res) => {
+    const mine = new Set(req.session.containers);
+    let runs = [];
+    let error = null;
+    try {
+      runs = (await helper(['list'], { timeout: 60_000 })).runs || [];
+    } catch (err) {
+      error = err.message;
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      error,
+      runs: runs.filter((r) => r.containers.some((c) => mine.has(c))).map((r) => {
+        const row = backupJobs.get(r.id);
+        return {
+          id: r.id, startedAt: r.startedAt, finishedAt: r.finishedAt, trigger: r.trigger,
+          containers: r.containers.filter((c) => mine.has(c)),
+          verify: row?.verify_result ? { at: row.verified_at, ...parse(row.verify_result, {}) } : null,
+        };
+      }),
+    });
+  }));
+
+  // Is this container part of the scheduled host backup? (helper config; null when the helper is not installed)
+  async function coverage(name) {
+    try {
+      const config = await helper(['get-config']);
+      if (!config?.targets) return null;
+      const included = config.targets.containers !== false && !(config.containerExclude || []).includes(name);
+      return { included, schedule: config.schedule || null };
+    } catch { return null; }
+  }
+
+  return { router, userRouter, start: poll, diskStatus, coverage };
 }

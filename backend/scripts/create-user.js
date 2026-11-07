@@ -9,7 +9,7 @@ import bcrypt from 'bcryptjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
-const { users, audit, USERNAME_RE, CONTAINER_RE, MIN_PASSWORD } = await import('../db.js');
+const { users, audit, USERNAME_RE, CONTAINER_RE, MIN_PASSWORD, ROLES } = await import('../db.js');
 
 if (!process.stdin.isTTY) {
   console.error('Run this in an interactive terminal (it asks for the password without echoing it).');
@@ -57,6 +57,7 @@ try {
 
   const existing = users.withHash(username);
   if (existing) {
+    if (existing.status !== 'active') console.log(`Note: "${username}" is ${existing.status}. Activate them in the panel (Users).`);
     const yes = await ask(`User "${username}" exists (role ${existing.role}). Reset their password? [y/N] `);
     if (yes.toLowerCase() !== 'y') { console.log('Nothing changed.'); process.exit(0); }
     users.setPassword(existing.id, await bcrypt.hash(await askPassword(), 12));
@@ -65,15 +66,17 @@ try {
     process.exit(0);
   }
 
-  const role = await askUntil('Role (admin/user): ', (a) => (['admin', 'user'].includes(a) ? null : 'Type admin or user'));
-  const container = role === 'user'
-    ? await askUntil('Container name (as in `lxc list`): ', (a) => (CONTAINER_RE.test(a) ? null : 'Letters, digits and dashes, starting with a letter'))
-    : null;
+  const role = await askUntil('Role (super_admin/admin/user): ', (a) => (ROLES.includes(a) ? null : 'Type super_admin, admin or user'));
+  const containers = role === 'user'
+    ? (await askUntil('Container name(s) as in `lxc list`, comma separated (empty for none): ', (a) => (
+      !a || a.split(',').every((c) => CONTAINER_RE.test(c.trim())) ? null : 'Letters, digits and dashes, starting with a letter'
+    ))).split(',').map((c) => c.trim()).filter(Boolean)
+    : [];
   const passwordHash = await bcrypt.hash(await askPassword(), 12);
 
-  users.create({ username, passwordHash, role, container });
-  audit.log({ username: 'cli', action: 'user_create', target: username, result: 'success', detail: container ? `container ${container}` : 'admin' });
-  console.log(`Created ${role} "${username}"${container ? ` for container "${container}"` : ''}.`);
+  users.create({ username, passwordHash, role, containers });
+  audit.log({ username: 'cli', action: 'user_create', target: username, result: 'success', detail: containers.length ? `servers ${containers.join(', ')}` : role });
+  console.log(`Created ${role} "${username}"${containers.length ? ` for ${containers.join(', ')}` : ''}.`);
 } finally {
   rl.close();
 }
