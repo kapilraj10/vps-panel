@@ -295,7 +295,7 @@ function StartDialog({ open, config, onClose, onStarted, onTask }) {
 
   return (
     <Dialog open={open} title="Back up now" onClose={onClose}>
-      <p>Choose what to back up this time. The daily schedule keeps using the targets in Settings.</p>
+      <p>Choose what to back up this time. Scheduled backups keep using the targets in Settings.</p>
       <div className="checks bk-gap">
         {TARGETS.map(([k, label]) => (
           <label key={k} className="check"><input type="checkbox" checked={targets.includes(k)} onChange={() => toggle(k)} />{label}</label>
@@ -523,6 +523,7 @@ function Settings({ config, containers, onSaved }) {
   const [saving, setSaving] = useState(false);
   useEffect(() => setF(toForm(config)), [config]);
 
+  const hourly = f.schedule.every === 'hour';
   const set = (patch) => setF((x) => ({ ...x, ...patch }));
   const setIn = (key, patch) => setF((x) => ({ ...x, [key]: { ...x[key], ...patch } }));
   const skippable = [...new Set([...containers, ...f.containerExclude])].sort();
@@ -539,7 +540,11 @@ function Settings({ config, containers, onSaved }) {
         hostPaths: lines(f.hostPaths),
         excludes: lines(f.excludes),
         schedule: f.schedule,
-        retention: { daily: Number(f.retention.daily), weekly: Number(f.retention.weekly), monthly: Number(f.retention.monthly) },
+        retention: {
+          // hourly only exists on helpers that support hourly runs; an older helper rejects unknown keys
+          ...(f.retention.hourly !== undefined ? { hourly: Number(f.retention.hourly) } : {}),
+          daily: Number(f.retention.daily), weekly: Number(f.retention.weekly), monthly: Number(f.retention.monthly),
+        },
         pm2User: f.pm2User.trim(),
       };
       onSaved(await api('/api/backups/settings', { method: 'PUT', body }));
@@ -597,12 +602,23 @@ function Settings({ config, containers, onSaved }) {
           <legend>Schedule and retention</legend>
           <div className="form form--row">
             <label className="check">
-              <input type="checkbox" checked={f.schedule.enabled} onChange={(e) => setIn('schedule', { enabled: e.target.checked })} />Daily backup on
+              <input type="checkbox" checked={f.schedule.enabled} onChange={(e) => setIn('schedule', { enabled: e.target.checked })} />Automatic backup on
             </label>
-            <label>Time (24h)<input type="time" required value={f.schedule.time} onChange={(e) => setIn('schedule', { time: e.target.value.slice(0, 5) })} /></label>
+            {f.schedule.every !== undefined && (
+              <label>Run
+                <select value={f.schedule.every} onChange={(e) => setIn('schedule', { every: e.target.value })}>
+                  <option value="hour">Every hour</option>
+                  <option value="day">Once a day</option>
+                </select>
+              </label>
+            )}
+            <label>{hourly ? 'Minute past the hour (only the minutes count)' : 'Time (24h)'}<input type="time" required value={f.schedule.time} onChange={(e) => setIn('schedule', { time: e.target.value.slice(0, 5) })} /></label>
             <label>Timezone<input required value={f.schedule.timezone} onChange={(e) => setIn('schedule', { timezone: e.target.value.trim() })} spellCheck={false} /></label>
           </div>
           <div className="form form--row">
+            {f.retention.hourly !== undefined && (
+              <label>Keep hourly<input type="number" min={0} max={168} value={f.retention.hourly} onChange={(e) => setIn('retention', { hourly: e.target.value })} /></label>
+            )}
             <label>Keep daily<input type="number" min={1} max={90} value={f.retention.daily} onChange={(e) => setIn('retention', { daily: e.target.value })} /></label>
             <label>Keep weekly<input type="number" min={0} max={52} value={f.retention.weekly} onChange={(e) => setIn('retention', { weekly: e.target.value })} /></label>
             <label>Keep monthly<input type="number" min={0} max={60} value={f.retention.monthly} onChange={(e) => setIn('retention', { monthly: e.target.value })} /></label>

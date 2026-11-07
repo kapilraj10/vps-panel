@@ -48,6 +48,7 @@ const TZ_RE = /^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+){0,2}$/;
 const HOST_PATH_RE = /^\/[A-Za-z0-9._@+/ -]*$/;
 const PROGRESS_RE = /^\s*[\d,.]+\w*\s+(\d{1,3})%\s/;
 const TARGETS = ['containers', 'host', 'databases', 'pm2'];
+const SCHEDULE_EVERY = ['day', 'hour'];
 const ORDER = ['pm2', 'databases', 'containers', 'host']; // quick ones first, rsync last
 
 const DEFAULTS = {
@@ -56,8 +57,9 @@ const DEFAULTS = {
   optimizedStorage: false,
   hostPaths: ['/home/kapil', '/etc', '/root', '/var/lib/docker/volumes', '/opt'],
   excludes: ['node_modules', '.cache', '*.log', '.next/cache'],
-  schedule: { enabled: true, time: '02:30', timezone: 'Asia/Kathmandu' },
-  retention: { daily: 7, weekly: 4, monthly: 3 },
+  // every: 'day' runs once a day at `time`; 'hour' runs every hour at the minute of `time`
+  schedule: { enabled: true, every: 'day', time: '02:30', timezone: 'Asia/Kathmandu' },
+  retention: { hourly: 24, daily: 7, weekly: 4, monthly: 3 },
   pm2User: 'kapil',
 };
 
@@ -172,8 +174,12 @@ function normalizeConfig(raw) {
   c.excludes = list(raw.excludes, 'excludes', 50, checkExclude, c.excludes);
 
   const s = sub(raw.schedule, 'schedule');
-  onlyKeys(s, ['enabled', 'time', 'timezone'], 'schedule.');
+  onlyKeys(s, ['enabled', 'every', 'time', 'timezone'], 'schedule.');
   c.schedule.enabled = bool(s.enabled, 'schedule.enabled', c.schedule.enabled);
+  if (s.every !== undefined) {
+    if (!SCHEDULE_EVERY.includes(s.every)) throw new UsageError('Schedule must run every "day" or every "hour"');
+    c.schedule.every = s.every;
+  }
   if (s.time !== undefined) {
     if (typeof s.time !== 'string' || !TIME_RE.test(s.time)) throw new UsageError('Schedule time must be HH:MM (24 hour)');
     c.schedule.time = s.time;
@@ -181,7 +187,8 @@ function normalizeConfig(raw) {
   if (s.timezone !== undefined) c.schedule.timezone = checkTimezone(s.timezone);
 
   const r = sub(raw.retention, 'retention');
-  onlyKeys(r, ['daily', 'weekly', 'monthly'], 'retention.');
+  onlyKeys(r, ['hourly', 'daily', 'weekly', 'monthly'], 'retention.');
+  c.retention.hourly = int(r.hourly, 'retention.hourly', 0, 168, c.retention.hourly);
   c.retention.daily = int(r.daily, 'retention.daily', 1, 90, c.retention.daily);
   c.retention.weekly = int(r.weekly, 'retention.weekly', 0, 52, c.retention.weekly);
   c.retention.monthly = int(r.monthly, 'retention.monthly', 0, 60, c.retention.monthly);
@@ -224,9 +231,9 @@ function isoWeek(id) {
   return `${year}-W${String(week).padStart(2, '0')}`;
 }
 
-// Grandfather-father-son: newest good backup of each of the last N days, weeks and months.
+// Grandfather-father-son: newest good backup of each of the last N hours, days, weeks and months.
 // The newest good backup is always kept, so pruning can never remove the only good one.
-function planRetention(ids, { daily, weekly, monthly }) {
+function planRetention(ids, { hourly = 0, daily, weekly, monthly }) {
   const sorted = [...new Set(ids)].filter((id) => ID_RE.test(id)).sort().reverse(); // newest first
   const keep = new Set(sorted.slice(0, 1));
   const pick = (keyOf, n) => {
@@ -239,6 +246,7 @@ function planRetention(ids, { daily, weekly, monthly }) {
       keep.add(id);
     }
   };
+  pick((id) => id.slice(0, 11), hourly); // 20261008-02
   pick((id) => id.slice(0, 8), daily);
   pick(isoWeek, weekly);
   pick((id) => id.slice(0, 6), monthly);
@@ -273,7 +281,9 @@ function rsyncArgs(config, { linkDest = null, dryRun = false } = {}) {
   return a;
 }
 
-const onCalendar = (s) => `*-*-* ${s.time}:00 ${s.timezone}`;
+const onCalendar = (s) => (s.every === 'hour'
+  ? `*-*-* *:${s.time.slice(3, 5)}:00 ${s.timezone}`
+  : `*-*-* ${s.time}:00 ${s.timezone}`);
 
 function fmtBytes(n) {
   const u = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -510,9 +520,9 @@ function deleteRun(id) {
 function pruneRuns(ctx, { extraId = null } = {}) {
   const ids = scanRuns().good.map((m) => m.id);
   if (extraId) ids.push(extraId);
-  const { daily, weekly, monthly } = ctx.config.retention;
+  const { hourly, daily, weekly, monthly } = ctx.config.retention;
   const plan = planRetention(ids, ctx.config.retention);
-  const rule = `${daily} daily, ${weekly} weekly, ${monthly} monthly`;
+  const rule = `${hourly ? `${hourly} hourly, ` : ''}${daily} daily, ${weekly} weekly, ${monthly} monthly`;
   if (!plan.remove.length) {
     ctx.log(`Retention (${rule}): keeping all ${plan.keep.length} good backup(s)`);
     return plan;
@@ -1007,12 +1017,28 @@ function loadConfig() {
   }
 }
 
+// A panel that predates a setting sends settings without it. Keep the saved value then, so saving in
+// an older panel never quietly turns hourly backups back into daily ones.
+function keepNewerKeys(input, current) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const out = { ...input };
+  for (const [section, key] of [['schedule', 'every'], ['retention', 'hourly']]) {
+    const v = out[section];
+    if (v && typeof v === 'object' && !Array.isArray(v) && !(key in v)) out[section] = { ...v, [key]: current[section][key] };
+  }
+  return out;
+}
+
+function savedConfigOrDefaults() {
+  try { return loadConfig(); } catch { return structuredClone(DEFAULTS); } // a broken file must not block fixing it
+}
+
 function cmdSetConfig() {
   const raw = fs.readFileSync(0, 'utf8');
   if (raw.length > 65536) throw new UsageError('Settings are too large');
   let input;
   try { input = JSON.parse(raw); } catch { throw new UsageError('Settings must be valid JSON'); }
-  const config = normalizeConfig(input);
+  const config = normalizeConfig(keepNewerKeys(input, savedConfigOrDefaults()));
   const cal = onCalendar(config.schedule);
   if (spawnSync('systemd-analyze', ['calendar', cal]).status !== 0) throw new UsageError(`systemd does not accept the schedule "${cal}"`);
   // Timer first: if that fails, the saved settings still match what systemd runs
@@ -1291,7 +1317,7 @@ async function main(argv) {
 }
 
 module.exports = {
-  normalizeConfig, planRetention, splitSafePath, makeId, isoWeek, dbKind, rsyncArgs, pickTargets, checkHostPath, onCalendar,
+  normalizeConfig, keepNewerKeys, planRetention, splitSafePath, makeId, isoWeek, dbKind, rsyncArgs, pickTargets, checkHostPath, onCalendar,
   DEFAULTS, ID_RE, CT_RE, NEW_CT_RE, DB_FILE_RE,
 };
 

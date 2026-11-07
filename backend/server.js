@@ -545,9 +545,11 @@ loop();
 // A staging copy next to the real panel must not poll LXD, run backup helpers,
 // repair Cloudflare routes or health-check apps: the real panel already does.
 const STAGING = process.env.STAGING_MODE === '1';
+// Backup polling only reads the helper's job files (the systemd timer runs the backups), so staging
+// does it too: otherwise its Backups page never sees runs finish and stays on "Starting…".
+backups.start();
 if (!STAGING) {
   containers.start();
-  backups.start();
   monitoring.start();
   domains.start();
   replicas.start();

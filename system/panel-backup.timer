@@ -2,7 +2,7 @@
 # The time below is only the default. The panel's schedule setting writes
 # /etc/systemd/system/panel-backup.timer.d/schedule.conf, which replaces it.
 [Unit]
-Description=Daily vps-panel backup
+Description=Scheduled vps-panel backup
 
 [Timer]
 OnCalendar=*-*-* 02:30:00 Asia/Kathmandu

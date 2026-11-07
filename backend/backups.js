@@ -151,8 +151,8 @@ function settingsDiff(before, after) {
   for (const k of Object.keys(after)) {
     if (JSON.stringify(after[k]) === JSON.stringify(before?.[k])) continue;
     const v = after[k];
-    if (k === 'schedule') parts.push(`schedule ${v.enabled ? `${v.time} ${v.timezone}` : 'off'}`);
-    else if (k === 'retention') parts.push(`retention ${v.daily}/${v.weekly}/${v.monthly}`);
+    if (k === 'schedule') parts.push(`schedule ${v.enabled ? `${v.every === 'hour' ? `hourly at :${v.time.slice(3, 5)}` : v.time} ${v.timezone}` : 'off'}`);
+    else if (k === 'retention') parts.push(`retention ${v.hourly !== undefined ? `${v.hourly}h/` : ''}${v.daily}/${v.weekly}/${v.monthly}`);
     else if (k === 'targets') parts.push(`targets ${Object.keys(v).filter((t) => v[t]).join(',') || 'none'}`);
     else if (typeof v === 'boolean' || typeof v === 'string') parts.push(`${k} ${v}`);
     else parts.push(k);
