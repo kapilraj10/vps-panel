@@ -292,18 +292,19 @@ export function createServers({ io, containers, allocator, stacks = null }) {
         ...(wantDocker ? DOCKER_LXD_CONFIG : {}),
         ...(count > 1 ? { 'user.kapilcloud.replica-of': name } : {}),
       };
+      // Remember whether this name already had panel state: a failed create must only undo what it added itself
+      const hadMeta = !!containerMeta.get(n);
       containerMeta.createdByPanel(n, { image: b.image, by: req.session.username });
-      if (owner) users.assign(owner.id, n);
       return job(req, n, 'create', async (p) => {
         p('Downloading image and creating (first time for an image can take a few minutes)');
         try {
           await createInstance({ name: n, image: b.image, config, devices, description: `Kapil Cloud server${owner ? ` for ${owner.username}` : ''}` },
             (m) => { const d = m.download_progress || m.create_instance_from_image_unpack_progress; if (d) p(d); });
         } catch (err) {
-          if (owner) db.prepare('DELETE FROM user_containers WHERE user_id = ? AND container = ?').run(owner.id, n);
-          containerMeta.remove(n);
+          if (!hadMeta && !/already exists/i.test(err.message)) containerMeta.remove(n);
           throw err;
         }
+        if (owner) users.assign(owner.id, n);
         if (b.start !== false) { p('Starting'); await changeState(n, 'start'); }
         if (!stack) return `Created ${n}`;
         await containers.poll().catch(() => {}); // facts (limits) for the new server

@@ -24,6 +24,7 @@ import Fleet from './pages/Fleet.jsx';
 import NetDiag from './pages/NetDiag.jsx';
 import { Uptime, Compare } from './pages/FleetViews.jsx';
 import Databases from './pages/Databases.jsx';
+import ContainerTools from './pages/ContainerTools.jsx';
 import SecurityCenter from './pages/SecurityCenter.jsx';
 
 const ConsolePage = lazy(() => import('./pages/Console.jsx'));
@@ -56,6 +57,7 @@ const ADMIN_NAV = [
   ['Cloud', [
     ['users', 'Users', 'users'],
     ['apps', 'Container apps', 'app'],
+    ['container-tools', 'Container tools', 'cpu'],
     ['domains', 'Domains', 'globe'],
     ['terminal', 'Terminal', 'terminal'],
   ]],
@@ -75,6 +77,9 @@ const USER_NAV = [
     ['overview', 'Overview', 'dashboard'],
     ['servers', 'My servers', 'server'],
     ['apps', 'Applications', 'app'],
+    ['pm2', 'PM2 Manager', 'cpu'],
+    ['docker', 'Docker Manager', 'storage'],
+    ['databases', 'Databases', 'disk'],
     ['terminal', 'Terminal', 'terminal'],
     ['storage', 'Storage', 'storage'],
     ['backups', 'Backups', 'backup'],
@@ -208,9 +213,10 @@ function Shell() {
     case 'netdiag': body = <NetDiag />; break;
     case 'uptime': body = <Uptime />; break;
     case 'compare': body = <Compare />; break;
-    case 'pm2': body = <Pm2Page />; break;
-    case 'docker': body = <DockerPage />; break;
-    case 'databases': body = <Databases />; break;
+    case 'pm2': body = me.isAdmin ? <Pm2Page /> : <ContainerTools kind="pm2" name={route[1]} />; break;
+    case 'docker': body = me.isAdmin ? <DockerPage /> : <ContainerTools kind="docker" name={route[1]} />; break;
+    case 'databases': body = me.isAdmin ? <Databases /> : <ContainerTools kind="databases" name={route[1]} />; break;
+    case 'container-tools': body = <ContainerTools admin kind={route[1] || 'pm2'} base={`container-tools/${route[1] || 'pm2'}`} name={route[2]} />; break;
     case 'security-center': body = <SecurityCenter tab={route[1] || 'check'} />; break;
     case 'monitoring': body = <Monitoring />; break;
     case 'settings': body = <Settings />; break;

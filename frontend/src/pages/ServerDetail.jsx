@@ -6,6 +6,8 @@ import {
   href, go, useApi, useAction, useConfirm,
 } from '../ui.jsx';
 
+import { AccessTab } from './ContainerTools.jsx';
+
 const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
 const RANGES = [['1h', '1 hour'], ['6h', '6 hours'], ['24h', '24 hours'], ['7d', '7 days']];
@@ -417,7 +419,7 @@ export default function ServerDetail({ name, tab }) {
   }
 
   const admin = me.isAdmin;
-  const tabs = [['overview', 'Overview'], ['snapshots', 'Snapshots'], ['apps', 'Apps'], ['logs', 'Logs']];
+  const tabs = [['overview', 'Overview'], ['snapshots', 'Snapshots'], ['apps', 'Apps'], ['access', 'Access'], ['logs', 'Logs']];
   if (admin) tabs.push(['resources', 'Resources'], ['stack', 'Stack'], ['settings', 'Settings']);
   const current = tabs.some(([id]) => id === tab) ? tab : 'overview';
 
@@ -433,6 +435,7 @@ export default function ServerDetail({ name, tab }) {
       {current === 'overview' && <OverviewTab c={c} d={d} admin={admin} />}
       {current === 'snapshots' && <SnapshotsTab c={c} d={d} reload={reload} busy={busy} />}
       {current === 'apps' && <AppsTab c={c} />}
+      {current === 'access' && <AccessTab c={c} />}
       {current === 'logs' && <LogsTab c={c} admin={admin} />}
       {current === 'resources' && admin && <ResourcesTab c={c} busy={busy} />}
       {current === 'stack' && admin && <StackTab c={c} busy={busy} />}

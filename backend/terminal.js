@@ -64,7 +64,7 @@ export function createTerminal({ containers }) {
       const id = crypto.randomUUID();
       const t = { id, handle, socket, container: name, userId: s.id, username: s.username, ip, startedAt: Date.now() };
       open.set(id, t);
-      handle.pty.on('message', (data) => socket.emit('term:data', { id, data: Buffer.isBuffer(data) ? data : Buffer.from(data) }));
+      handle.onData((data) => socket.emit('term:data', { id, data }));
       handle.pty.on('close', () => closeTerm(id, 'shell exited'));
       handle.done.then(() => closeTerm(id, 'shell exited'));
       armIdle(t);

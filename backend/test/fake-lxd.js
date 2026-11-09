@@ -75,7 +75,10 @@ export function startFakeLxd(socketPath, { instances: initial = {} } = {}) {
         const op = ops.get(m[1]);
         if (!op) return err(res, 404, 'not found');
         const t = Number(url.searchParams.get('timeout') || 30) * 1000;
-        return Promise.race([op.done, new Promise((r) => setTimeout(r, t))]).then(() => ok(res, { ...op, done: undefined }));
+        // Same reply as real LXD 5.21 when the wait expires while the operation is still running
+        return Promise.race([op.done.then(() => true), new Promise((r) => setTimeout(() => r(false), t))]).then((finished) => (finished
+          ? ok(res, { ...op, done: undefined })
+          : send(res, 200, { type: 'error', status: '', status_code: 0, operation: '', error_code: 500, error: 'context deadline exceeded' })));
       }
       if (p === '/1.0/profiles/default') return ok(res, profile);
       if (p === '/1.0/networks') return ok(res, [{ name: 'lxdbr0', type: 'bridge', managed: true, config: { 'ipv4.address': '10.10.10.1/24' } }]);
@@ -211,13 +214,34 @@ export function startFakeLxd(socketPath, { instances: initial = {} } = {}) {
     });
   });
 
+  // Canned output of the container tools (containertools.js), keyed by the TOOL_OP each call sets
+  function toolReply(ex) {
+    const e = ex.env;
+    if (e.ACCT === 'missing') return { out: '', code: 40 };
+    if (e.ACCT === 'daemon') return { out: '', code: 41 };
+    const dbRow = JSON.stringify({ ID: 'abc', Names: 'kc-db-shop', Image: 'postgres:17-alpine', State: 'running', Status: 'Up 1 minute', Ports: '127.0.0.1:5432->5432/tcp', Labels: 'kapil.cloud.db=shop,kapil.cloud.engine=postgres' });
+    const appRow = JSON.stringify({ ID: 'def', Names: 'web', Image: 'nginx:alpine', State: 'running', Status: 'Up 2 minutes', Ports: '0.0.0.0:8080->80/tcp', Labels: '' });
+    const replies = {
+      accounts: '@@ACC root 0 L root /bin/bash\n@@ACC deploy 1000 P deploy,sudo /bin/bash\n@@SSHD\n@@CFG passwordauthentication no\n@@CFG permitrootlogin prohibit-password\n',
+      'set-password': e.CREATE === '1' ? '@@CREATED\n' : '',
+      'pm2-status': `@@JSON\n${JSON.stringify([
+        { name: 'web', pm2_env: { status: 'online', exec_mode: 'cluster_mode', restart_time: 1, pm_uptime: 1 }, monit: { cpu: 2, memory: 100 } },
+        { name: 'web', pm2_env: { status: 'online', exec_mode: 'cluster_mode', restart_time: 0, pm_uptime: 1 }, monit: { cpu: 3, memory: 200 } },
+        { name: 'pm2-logrotate', pm2_env: { status: 'online', pmx_module: true }, monit: {} },
+      ])}\n`,
+      'docker-status': `@@C ${dbRow}\n@@C ${appRow}\n`,
+      'db-inspect': JSON.stringify([{ Config: { Env: ['POSTGRES_USER=app', 'POSTGRES_PASSWORD=s3cret', 'POSTGRES_DB=shop'], Labels: { 'kapil.cloud.db': 'shop', 'kapil.cloud.engine': 'postgres' } }, HostConfig: { PortBindings: { '5432/tcp': [{ HostIp: '127.0.0.1', HostPort: '5433' }] } } }]),
+    };
+    return { out: replies[e.TOOL_OP] ?? 'ok\n', code: 0 };
+  }
+
   // Behaviour of the fake "container": interactive = echo shell; otherwise prints a fake deploy result
   function runExec(ex) {
     if (ex.interactive) {
       ex.socks['0'].send(Buffer.from('fake-shell$ '));
       ex.socks['0'].on('message', (d) => {
         const text = d.toString();
-        if (text.includes('exit')) { ex.socks['0'].close(); ex.resolve({ return: 0 }); return; }
+        if (text.includes('exit')) { ex.socks['0'].once('close', () => ex.resolve({ return: 0 })); ex.socks['0'].send(''); return; } // like LXD: empty frame, then wait for the client to hang up
         ex.socks['0'].send(Buffer.from(`echo:${text}`));
       });
       ex.socks.control.on('message', (d) => { ex.lastControl = JSON.parse(d.toString()); });
@@ -232,6 +256,12 @@ export function startFakeLxd(socketPath, { instances: initial = {} } = {}) {
       if (ex.env.WANT_DOCKER === '1') out += '@@VERSION docker 27.0.0\n';
       if (ex.env.WANT_CLOUDFLARED === '1') out += '@@VERSION cloudflared 2026.1.0\n';
       out += '==> Ready\n';
+    }
+    if (ex.env.TOOL_OP) {
+      const code = toolReply(ex);
+      ex.socks['1'].send(Buffer.from(code.out));
+      setTimeout(() => { ex.socks['1'].close(); ex.socks['2'].close(); ex.resolve({ return: code.code }); }, 20);
+      return;
     }
     if (ex.env.OP === 'status') out = '[{"name":"web","pm2_env":{"status":"online","restart_time":0},"monit":{"cpu":1,"memory":1000}}]';
     ex.socks['1'].send(Buffer.from(out));

@@ -80,3 +80,9 @@ sudo bash <panel folder>/system/install-security.sh --tools   # installs ufw + f
 |---|---|
 | `backend/test/platform.test.js` | databases (roles, validation, create/ports/bind/env/labels, credentials audited, stop/start/logs, delete keeps volume, failed create), 2FA (setup, login, replay, recovery once, reset, policy), Security center (helper calls, guards, audit, login blocks), master setup (primary, Kathmandu, key block idempotent, other keys kept) |
 | `system/test/kapil-security.test.cjs` | helper validation, ufw/fail2ban/sshd/ss parsing, SSH guard, CLI rejects bad input before running anything |
+
+## Container access and tools (owners)
+
+Each server has an **Access** tab: Linux account passwords (typed or generated), new accounts, account lock, and SSH password login. The SSH setting is written to `/etc/ssh/sshd_config.d/10-kapilcloud-password.conf`, which sorts before the image's `60-cloudimg-settings.conf`, and sshd keeps the first value it reads.
+
+Users get PM2 Manager, Docker Manager and Databases for their own servers (`backend/containertools.js`); admins reach the same pages under **Container tools**. Everything runs inside the container through LXD exec. Docker and the databases need Docker turned on first, which is super-admin-only from the server's Stack tab because it changes LXD security settings. Databases listen on 127.0.0.1 inside the container. For replicas inside a container, use PM2 cluster mode and Scale.
