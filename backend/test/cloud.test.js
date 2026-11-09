@@ -554,7 +554,7 @@ test('typing exit in the terminal ends the session', async () => {
   s.close();
 });
 
-test('a create that collides with an unpolled server keeps its existing owner', async () => {
+test('create asks LXD: a name the cached list has not seen is refused, and its owner is kept', async () => {
   await admin.put('/api/settings', { cpu_overcommit: 8, memory_overcommit: 2 });
   const made = await admin.post('/api/users', { username: 'ghostowner', password: PW, role: 'user' });
   assert.equal(made.status, 201, JSON.stringify(made.data));
@@ -564,12 +564,21 @@ test('a create that collides with an unpolled server keeps its existing owner', 
   direct.prepare('INSERT INTO user_containers (user_id, container, assigned_at) VALUES (?, ?, ?)').run(ownerId, 'ghost', Date.now());
   direct.close();
   const r = await admin.post('/api/containers', { name: 'ghost', image: 'ubuntu-24.04', cpu: 1, memoryMiB: 256, diskGiB: 10, ownerId, acceptWarnings: true });
-  assert.equal(r.status, 202, JSON.stringify(r.data)); // must get past the cached check to reach the failure path
-  await sleep(800);
+  assert.equal(r.status, 409, JSON.stringify(r.data));
+  assert.match(r.data.error, /already exists/);
+  await sleep(300);
   const check = new Database(DB, { readonly: true });
-  const row = check.prepare('SELECT 1 FROM user_containers WHERE user_id = ? AND container = ?').get(ownerId, 'ghost');
+  assert.ok(check.prepare('SELECT 1 FROM user_containers WHERE user_id = ? AND container = ?').get(ownerId, 'ghost'), 'owner kept');
   check.close();
-  assert.ok(row, 'OWNERLOST: the failed create removed the owner of the existing server');
+});
+
+test('a leftover panel record for a deleted server does not block its name', async () => {
+  const direct = new Database(DB);
+  direct.prepare("INSERT INTO container_meta (name, protected, origin, created_at) VALUES ('orphan', 0, 'panel', ?)").run(Date.now());
+  direct.close();
+  const r = await admin.post('/api/containers', { name: 'orphan', image: 'ubuntu-24.04', cpu: 1, memoryMiB: 256, diskGiB: 10, acceptWarnings: true });
+  assert.equal(r.status, 202, JSON.stringify(r.data));
+  await until(async () => (await admin.get('/api/containers/orphan')).data?.status === 'Running');
 });
 
 test('container tools: owner manages own server, never another', async () => {

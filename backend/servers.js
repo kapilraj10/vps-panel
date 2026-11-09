@@ -2,7 +2,7 @@
 // that can lose data is admin-only, needs a typed confirmation, and refuses protected containers.
 import express from 'express';
 import net from 'node:net';
-import {
+import { listInstances,
   IMAGES, createInstance, deleteInstance, copyInstance, renameInstance, rebuildInstance, updateInstance,
   listSnapshots, createSnapshot, deleteSnapshot, restoreSnapshot, validSnapshotName, instanceLog, consoleLog,
   getNetwork, networkLeases, hasExtension, getProfile, toMiB, toGiB, changeState,
@@ -245,9 +245,11 @@ export function createServers({ io, containers, allocator, stacks = null }) {
     if (!NEW_CONTAINER_RE.test(name)) throw bad('Name: 2-63 lowercase letters, digits or dashes, starting with a letter, not ending with a dash');
     const count = b.count == null || b.count === '' ? 1 : int(b.count, { min: 1, max: MAX_REPLICAS, name: 'Number of servers' });
     const names = count === 1 ? [name] : Array.from({ length: count }, (_, i) => `${name}-${i + 1}`);
+    // Ask LXD itself: the cached list can lag behind it, and nothing may change in the panel for a name that is taken
+    const inLxd = new Set((await listInstances()).map((i) => i.name));
     for (const n of names) {
       if (!NEW_CONTAINER_RE.test(n)) throw bad(`${n} is not a valid name (keep the base name shorter)`);
-      if (containers.exists(n) || containerMeta.get(n)) throw conflict(`A server named ${n} already exists`);
+      if (inLxd.has(n) || containers.exists(n) || containers.busy(n)) throw conflict(`A server named ${n} already exists. It may be stopped or hidden from your list; pick another name or delete it first.`);
     }
     if (!IMAGES[b.image]) throw bad('Pick an image');
     const stack = parseStack(b.stack, req.session);
@@ -292,8 +294,6 @@ export function createServers({ io, containers, allocator, stacks = null }) {
         ...(wantDocker ? DOCKER_LXD_CONFIG : {}),
         ...(count > 1 ? { 'user.kapilcloud.replica-of': name } : {}),
       };
-      // Remember whether this name already had panel state: a failed create must only undo what it added itself
-      const hadMeta = !!containerMeta.get(n);
       containerMeta.createdByPanel(n, { image: b.image, by: req.session.username });
       return job(req, n, 'create', async (p) => {
         p('Downloading image and creating (first time for an image can take a few minutes)');
@@ -301,7 +301,7 @@ export function createServers({ io, containers, allocator, stacks = null }) {
           await createInstance({ name: n, image: b.image, config, devices, description: `Kapil Cloud server${owner ? ` for ${owner.username}` : ''}` },
             (m) => { const d = m.download_progress || m.create_instance_from_image_unpack_progress; if (d) p(d); });
         } catch (err) {
-          if (!hadMeta && !/already exists/i.test(err.message)) containerMeta.remove(n);
+          if (!/already exists/i.test(err.message)) containerMeta.remove(n);
           throw err;
         }
         if (owner) users.assign(owner.id, n);

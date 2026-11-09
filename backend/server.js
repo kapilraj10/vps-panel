@@ -545,14 +545,15 @@ server.listen(PORT, HOST, () => {
 });
 loop();
 
-// A staging copy next to the real panel must not poll LXD, run backup helpers,
-// repair Cloudflare routes or health-check apps: the real panel already does.
+// A staging copy next to the real panel must not run backup helpers, repair Cloudflare routes or health-check
+// apps: the real panel already does. Reading LXD is different, because the server list, the "name is taken" check
+// and every per-server page depend on it, and without the loop the list is empty after each restart.
 const STAGING = process.env.STAGING_MODE === '1';
 // Backup polling only reads the helper's job files (the systemd timer runs the backups), so staging
 // does it too: otherwise its Backups page never sees runs finish and stays on "Starting…".
 backups.start();
+containers.start();
 if (!STAGING) {
-  containers.start();
   monitoring.start();
   domains.start();
   replicas.start();

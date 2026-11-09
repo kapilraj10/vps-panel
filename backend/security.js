@@ -56,7 +56,7 @@ function panelChecks() {
   const without = admins.filter((u) => !users.twoFactor(u.id)?.totp_enabled_at).map((u) => u.username);
   add('admin_2fa', 'Two-factor login for admins', without.length ? (settings.get('require_2fa_admins') ? 'warn' : 'bad') : 'ok',
     without.length ? `without 2FA: ${without.join(', ')}` : `all ${admins.length} admins use it`, without.length ? 'Security → Two-factor login (each admin), then Settings → require it' : null);
-  add('staging', 'Staging mode', process.env.STAGING_MODE === '1' ? 'warn' : 'ok', process.env.STAGING_MODE === '1' ? 'STAGING_MODE=1: containers, backups and monitoring are off' : 'off',
+  add('staging', 'Staging mode', process.env.STAGING_MODE === '1' ? 'warn' : 'ok', process.env.STAGING_MODE === '1' ? 'STAGING_MODE=1: monitoring, domain repair, replicas and fleet loops are off' : 'off',
     process.env.STAGING_MODE === '1' ? 'Remove STAGING_MODE from the .env of the main panel' : null);
   const fails = db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'login' AND result = 'failure' AND ts > ?").get(Date.now() - 86400_000).n;
   add('login_failures', 'Failed panel logins (24 h)', fails > 50 ? 'warn' : 'ok', String(fails));
