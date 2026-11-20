@@ -15,7 +15,7 @@ function Register() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState(false);
-  useEffect(() => { api('/api/public/info').then(setInfo).catch(() => setInfo({ signup: { enabled: true } })); }, []);
+  useEffect(() => { document.title = 'Create account · Sampanna Cloud'; api('/api/public/info').then(setInfo).catch(() => setInfo({ signup: { enabled: true } })); }, []);
   const set = (k) => (e) => setF({ ...f, [k]: k === 'username' ? e.target.value.toLowerCase().trim() : e.target.value });
   async function submit(e) {
     e.preventDefault();
