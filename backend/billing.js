@@ -65,17 +65,22 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
     const until = Math.min(now, r.ended_at || now);
     const elapsed = until - r.billed_until;
     if (elapsed <= 0) return 0;
-    if (r.paused) { db.prepare('UPDATE billed_resources SET billed_until = ? WHERE id = ?').run(until, r.id); return 0; }
+    if (r.paused) { db.prepare('UPDATE billed_resources SET billed_until = ? WHERE id = ? AND billed_until = ?').run(until, r.id, r.billed_until); return 0; }
     const exact = (r.price_day * elapsed) / DAY + (r.carry || 0);
-    const amount = Math.floor(exact);
+    const amount = Math.floor(exact + 1e-6); // tolerance: float carries must not lose a paisa over many settlements
+    let charged = 0;
     db.transaction(() => {
-      db.prepare('UPDATE billed_resources SET billed_until = ?, carry = ?, charged = charged + ? WHERE id = ?').run(until, exact - amount, amount, r.id);
-      if (amount > 0) {
+      // Idempotent: only the settlement that still sees the old billed_until moves it and charges. A second run for the
+      // same period (a retry, a duplicate job, a stale row object) changes nothing.
+      const moved = db.prepare('UPDATE billed_resources SET billed_until = ?, carry = ?, charged = charged + ? WHERE id = ? AND billed_until = ?')
+        .run(until, Math.max(0, exact - amount), amount, r.id, r.billed_until).changes;
+      if (moved && amount > 0) {
+        charged = amount;
         const hours = Math.round((elapsed / HOUR) * 100) / 100;
         addTx(r.user_id, -amount, 'charge', { resourceId: r.id, note: `${r.kind} ${r.name}: ${hours} h` });
       }
     })();
-    return amount;
+    return charged;
   }
 
   // Starts billing a resource for a user (idempotent per kind+name)

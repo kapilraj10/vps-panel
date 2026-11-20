@@ -556,6 +556,88 @@ const MIGRATIONS = [
       ALTER TABLE apps ADD COLUMN plan_id INTEGER REFERENCES plans(id) ON DELETE SET NULL;
     `,
   },
+  {
+    version: 9,
+    name: 'multi-tenant: hosting packages, customer VPS, database targets + Redis, invoices',
+    sql: `
+      ALTER TABLE plans ADD COLUMN max_apps INTEGER;
+      ALTER TABLE plans ADD COLUMN max_databases INTEGER;
+      ALTER TABLE users ADD COLUMN hosting_plan_id INTEGER REFERENCES plans(id) ON DELETE SET NULL;
+
+      -- Servers a CUSTOMER connects (their own VPS). Separate from the admin fleet (nodes): a customer can never reach
+      -- an admin node, and admins see these read-mostly. Credentials are sealed (AES-256-GCM) and never returned.
+      CREATE TABLE customer_servers (
+        id            INTEGER PRIMARY KEY,
+        user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name          TEXT NOT NULL,
+        host          TEXT NOT NULL,
+        port          INTEGER NOT NULL DEFAULT 22,
+        username      TEXT NOT NULL,
+        auth_type     TEXT NOT NULL CHECK (auth_type IN ('key', 'password')),
+        secret_enc    TEXT NOT NULL,
+        host_key      TEXT,
+        status        TEXT NOT NULL DEFAULT 'new',
+        facts         TEXT,
+        last_check_at INTEGER,
+        last_error    TEXT,
+        created_at    INTEGER NOT NULL,
+        updated_at    INTEGER NOT NULL,
+        UNIQUE (user_id, name)
+      );
+      ALTER TABLE apps ADD COLUMN server_id INTEGER REFERENCES customer_servers(id) ON DELETE SET NULL;
+
+      CREATE TABLE databases_new (
+        id                INTEGER PRIMARY KEY,
+        name              TEXT NOT NULL UNIQUE,
+        engine            TEXT NOT NULL CHECK (engine IN ('postgres', 'mysql', 'mongo', 'redis')),
+        version           TEXT NOT NULL,
+        image             TEXT NOT NULL,
+        container         TEXT NOT NULL,
+        volume            TEXT NOT NULL,
+        port              INTEGER NOT NULL,
+        bind_ip           TEXT NOT NULL,
+        db_name           TEXT NOT NULL,
+        db_user           TEXT NOT NULL,
+        password_enc      TEXT NOT NULL,
+        root_password_enc TEXT,
+        memory_mb         INTEGER,
+        status            TEXT NOT NULL,
+        error             TEXT,
+        notes             TEXT,
+        created_by        TEXT,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL,
+        owner_id          INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        target            TEXT NOT NULL DEFAULT 'main' CHECK (target IN ('main', 'vps')),
+        server_id         INTEGER REFERENCES customer_servers(id) ON DELETE SET NULL
+      );
+      INSERT INTO databases_new (id, name, engine, version, image, container, volume, port, bind_ip, db_name, db_user, password_enc,
+        root_password_enc, memory_mb, status, error, notes, created_by, created_at, updated_at, owner_id)
+        SELECT id, name, engine, version, image, container, volume, port, bind_ip, db_name, db_user, password_enc,
+        root_password_enc, memory_mb, status, error, notes, created_by, created_at, updated_at, owner_id FROM databases;
+      DROP TABLE databases;
+      ALTER TABLE databases_new RENAME TO databases;
+      -- main-server databases keep unique containers/ports; on a customer VPS they only need to be unique per server
+      CREATE UNIQUE INDEX databases_main_port ON databases(port) WHERE target = 'main';
+      CREATE UNIQUE INDEX databases_main_container ON databases(container) WHERE target = 'main';
+
+      -- Monthly statement per user (opening balance, top-ups, charges, closing balance), written once per month
+      CREATE TABLE invoices (
+        id         INTEGER PRIMARY KEY,
+        user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        period     TEXT NOT NULL,
+        number     TEXT NOT NULL UNIQUE,
+        opening    INTEGER NOT NULL,
+        topups     INTEGER NOT NULL,
+        charges    INTEGER NOT NULL,
+        adjustments INTEGER NOT NULL,
+        closing    INTEGER NOT NULL,
+        lines      TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE (user_id, period)
+      );
+    `,
+  },
 ];
 
 function migrate() {
