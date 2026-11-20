@@ -1,6 +1,6 @@
 // Databases: PostgreSQL, MySQL and MongoDB in Docker on the master server (create, connect, start/stop, logs, delete).
 import { useState } from 'react';
-import { api, ago, Dialog } from '../lib.jsx';
+import { api, ago, bytes, getCsrf, Dialog } from '../lib.jsx';
 import { useLive } from '../live.js';
 import { PageHeader, Card, Badge, Empty, SkeletonRows, ErrorNote, Field, Icon, Note, Stat, Copy, useApi, useAction, useConfirm } from '../ui.jsx';
 import { LogDialog } from './Pm2Page.jsx';
@@ -11,17 +11,30 @@ const STATE = { running: 'good', exited: 'neutral', restarting: 'warn', paused: 
 
 function NewDatabase({ options, onClose, onDone, self = false }) {
   const run = useAction();
-  const [f, setF] = useState({ name: '', engine: 'postgres', version: '', dbName: 'app', user: 'app', access: self ? 'containers' : 'local', memoryMb: '', notes: '', planId: '' });
+  const [f, setF] = useState({ name: '', engine: 'postgres', version: '', dbName: 'app', user: 'app', access: self ? 'containers' : 'local', memoryMb: '', notes: '', planId: '', target: 'main', serverId: '' });
+  const vps = useApi(self ? '/api/my-servers' : null);
+  const myVps = vps.data?.servers || [];
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value, ...(k === 'engine' ? { version: '' } : {}) });
   const eng = options.engines[f.engine];
   async function submit(e) {
     e.preventDefault();
     const body = { ...f, version: f.version || eng.versions[0], memoryMb: f.memoryMb ? Number(f.memoryMb) : undefined, planId: f.planId ? Number(f.planId) : undefined };
+    if (f.target === 'vps') { body.serverId = Number(f.serverId || myVps[0]?.id); delete body.planId; } else delete body.serverId;
     if (await run(() => api('/api/databases', { method: 'POST', body }), `${f.name}: creating (first time downloads the image, a few minutes)`)) { onDone(); onClose(); }
   }
   return (
     <Dialog open title="New database" onClose={onClose} wide>
       <form className="form" onSubmit={submit}>
+        {self && (
+          <div className="plan-grid">
+            {[['main', 'Main server (managed)', 'Runs on Sampanna Cloud, backed up every night, billed per day'], ['vps', 'My VPS', myVps.length ? 'Docker on your own connected server, no charge' : 'Connect a VPS first (My VPS servers)']].map(([id, label, sub]) => (
+              <label key={id} className={`plan-card ${f.target === id ? 'is-on' : ''} ${id === 'vps' && !myVps.length ? 'is-off' : ''}`}>
+                <input type="radio" name="dbtarget" disabled={id === 'vps' && !myVps.length} checked={f.target === id} onChange={() => setF({ ...f, target: id })} />
+                <strong>{label}</strong><small className="muted">{sub}</small>
+              </label>
+            ))}
+          </div>
+        )}
         <div className="fgrid">
           <Field label="Name" hint="a-z, 0-9, dash (3-32)"><input required autoFocus pattern="[a-z][a-z0-9-]{1,30}[a-z0-9]" value={f.name} onChange={set('name')} placeholder="shop" /></Field>
           <Field label="Engine">
@@ -30,7 +43,12 @@ function NewDatabase({ options, onClose, onDone, self = false }) {
           <Field label="Version"><select value={f.version || eng.versions[0]} onChange={set('version')}>{eng.versions.map((v) => <option key={v}>{v}</option>)}</select></Field>
           <Field label="Database name"><input required pattern="[a-z_][a-z0-9_]{0,30}" value={f.dbName} onChange={set('dbName')} /></Field>
           <Field label={f.engine === 'mongo' ? 'Admin user' : 'User'}><input required pattern="[a-z_][a-z0-9_]{0,30}" value={f.user} onChange={set('user')} /></Field>
-          {self ? (
+          {self && f.target === 'vps' ? (
+            <>
+              <Field label="Your VPS"><select required value={f.serverId || myVps[0]?.id || ''} onChange={set('serverId')}>{myVps.map((v) => <option key={v.id} value={v.id}>{v.name} ({v.host})</option>)}</select></Field>
+              <Field label="Memory limit (MB)" hint="Empty = no limit"><input type="number" min={128} value={f.memoryMb} onChange={set('memoryMb')} placeholder="512" /></Field>
+            </>
+          ) : self ? (
             <Field label="Plan" hint="Charged by the hour from your wallet">
               <select required value={f.planId} onChange={set('planId')}><option value="">Pick a plan</option>
                 {options.plans.map((p) => <option key={p.id} value={p.id}>{p.name}: {p.memoryMb} MB RAM, {fmtMoney(p.priceDay)}/day</option>)}</select>
@@ -42,7 +60,8 @@ function NewDatabase({ options, onClose, onDone, self = false }) {
             <select value={f.access} onChange={set('access')}>{options.access.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}</select>
           </Field>
         )}
-        {self && <Note>Your servers reach it on the private network address shown under Connect. It is never open to the internet.</Note>}
+        {self && f.target === 'main' && <Note>Your servers reach it on the private network address shown under Connect. It is never open to the internet.</Note>}
+        {self && f.target === 'vps' && <Note>Created with Docker on your VPS, listening on 127.0.0.1 there (apps on that server use it). Back it up on your server; the nightly backups cover main-server databases only.</Note>}
         <Field label="Notes" wide><input maxLength={300} value={f.notes} onChange={set('notes')} placeholder="Used by the shop API" /></Field>
         <Note>A strong password is generated and stored encrypted. The port is never opened to the internet. Daily backups include it automatically (Backups → Databases).</Note>
         <div className="dialog__buttons"><button type="button" className="btn" onClick={onClose}>Cancel</button><button type="submit" className="btn btn--primary">Create</button></div>
@@ -80,6 +99,41 @@ function Credentials({ db, onClose }) {
   );
 }
 
+function Usage({ d }) {
+  const { data } = useApi(d.status === 'ready' ? `/api/databases/${d.id}/stats` : null, { interval: 15_000 });
+  if (!data?.running) return <span className="muted">–</span>;
+  return <span className="small">{Math.round(data.cpu * 10) / 10}% CPU<br />{bytes(data.memory)}{data.memoryLimit ? ` / ${bytes(data.memoryLimit)}` : ''}</span>;
+}
+
+function Restore({ d, onClose }) {
+  const [file, setFile] = useState(null);
+  const [typed, setTyped] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  async function go(e) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const r = await fetch(`/api/databases/${d.id}/restore?confirm=${encodeURIComponent(typed)}`, { method: 'POST', credentials: 'same-origin', headers: { 'x-csrf-token': getCsrf(), 'content-type': 'application/octet-stream' }, body: file });
+      setResult(await r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` })));
+    } catch (err) { setResult({ ok: false, error: err.message }); }
+    setBusy(false);
+  }
+  return (
+    <Dialog open wide title={`Restore ${d.name}`} onClose={onClose}>
+      <form className="form" onSubmit={go}>
+        <Note tone="warn">The dump is loaded into the running database and can overwrite tables with the same names{d.engine === 'mongo' ? ' (MongoDB: collections in the dump are dropped first)' : ''}. Download a fresh dump first if unsure.</Note>
+        <Field label="Dump file" hint=".sql / .sql.gz (PostgreSQL, MySQL) or .archive / .archive.gz (MongoDB), e.g. from Backups or Download dump"><input type="file" required onChange={(e) => setFile(e.target.files[0] || null)} /></Field>
+        <Field label={`Type ${d.name} to confirm`}><input required value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" /></Field>
+        {result && (result.ok ? <Note>Restored ({bytes(result.bytes)}).</Note> : <ErrorNote error={result.error || 'Restore failed'} />)}
+        {result?.output && <pre className="log">{result.output}</pre>}
+        <div className="dialog__buttons"><button type="button" className="btn" onClick={onClose}>Close</button>
+          <button type="submit" className="btn btn--primary btn--danger" disabled={busy || typed !== d.name || !file}>{busy ? 'Restoring…' : 'Restore'}</button></div>
+      </form>
+    </Dialog>
+  );
+}
+
 export default function Databases() {
   const { me } = useLive();
   const self = !me.isAdmin;
@@ -91,6 +145,7 @@ export default function Databases() {
   const [creating, setCreating] = useState(false);
   const [creds, setCreds] = useState(null);
   const [logs, setLogs] = useState(null);
+  const [restore, setRestore] = useState(null);
   const list = data?.databases || [];
   const act = async (d, a) => { if (await run(() => api(`/api/databases/${d.id}/${a}`, { method: 'POST' }), `${d.name}: ${a} done`)) reload(); };
   async function remove(d) {
@@ -125,18 +180,20 @@ export default function Databases() {
         {list.length > 0 && (
           <div className="table-wrap">
             <table className="table">
-              <thead><tr><th>Name</th><th>Engine</th><th>Status</th><th>Address</th><th>Database / user</th><th>Created</th><th /></tr></thead>
+              <thead><tr><th>Name</th><th>Engine</th><th>Where</th><th>Status</th><th>Usage</th><th>Address</th><th>Database / user</th><th>Created</th><th /></tr></thead>
               <tbody>
                 {list.map((d) => (
                   <tr key={d.id}>
                     <td><strong>{d.name}</strong>{d.notes && <><br /><small className="muted">{d.notes}</small></>}</td>
                     <td>{d.engineLabel} {d.version}<br /><small className="muted mono">{d.image}</small></td>
+                    <td>{d.target === 'vps' ? <>My VPS<br /><small className="muted">{d.serverName}</small></> : 'Main server'}{!self && d.ownerId && <small className="block muted">customer</small>}</td>
                     <td>
                       {BUSY.includes(d.status) ? <Badge tone="warn" dot>{d.status}…</Badge>
                         : d.status === 'error' ? <Badge tone="bad" dot>failed</Badge>
                           : <Badge tone={STATE[d.state] || 'bad'} dot>{d.state || 'missing'}</Badge>}
                       {d.error && <><br /><small className="bad">{d.error}</small></>}
                     </td>
+                    <td><Usage d={d} /></td>
                     <td className="mono small">{d.bindIp}:{d.port}</td>
                     <td className="mono small">{d.dbName} / {d.user}</td>
                     <td className="muted">{ago(d.createdAt)}<br /><small>{d.createdBy}</small></td>
@@ -144,6 +201,8 @@ export default function Databases() {
                       <div className="row-actions">
                         {sup && d.status === 'ready' && <button type="button" className="btn btn--small btn--primary" onClick={() => setCreds(d)}>Connect</button>}
                         {d.status === 'ready' && <button type="button" className="btn btn--small" onClick={() => setLogs(d)}>Logs</button>}
+                        {sup && d.status === 'ready' && d.target !== 'vps' && <a className="btn btn--small" href={`/api/databases/${d.id}/dump`} download>Download dump</a>}
+                        {sup && d.status === 'ready' && d.target !== 'vps' && options.data?.engines[d.engine]?.restore && <button type="button" className="btn btn--small" onClick={() => setRestore(d)}>Restore</button>}
                         {sup && d.status === 'ready' && (d.state === 'running'
                           ? <><button type="button" className="btn btn--small" onClick={() => act(d, 'restart')}>Restart</button><button type="button" className="btn btn--small" onClick={() => act(d, 'stop')}>Stop</button></>
                           : <button type="button" className="btn btn--small" onClick={() => act(d, 'start')}>Start</button>)}
@@ -163,6 +222,7 @@ export default function Databases() {
       <Note>Apps on this server connect to <code>127.0.0.1:&lt;port&gt;</code>. Apps inside LXD containers need a database created with “LXD containers” access and connect to the bridge address. To reach a database from your laptop, use an SSH tunnel: <code>ssh -L 5432:127.0.0.1:&lt;port&gt; kapil@ssh.your-domain</code>.</Note>
       {creating && options.data && <NewDatabase self={self} options={options.data} onClose={() => setCreating(false)} onDone={reload} />}
       {creds && <Credentials db={creds} onClose={() => setCreds(null)} />}
+      {restore && <Restore d={restore} onClose={() => { setRestore(null); reload(); }} />}
       {logs && <LogDialog title={`Logs: ${logs.name}`} url={`/api/databases/${logs.id}/logs`} onClose={() => setLogs(null)} />}
     </>
   );

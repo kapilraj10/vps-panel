@@ -107,6 +107,7 @@ before(async () => {
   fs.mkdirSync(VHOME, { recursive: true });
   fs.mkdirSync(BIN);
   for (const tool of ['pm2', 'docker']) fs.writeFileSync(path.join(BIN, tool), `#!/bin/sh\necho "${tool} $*" >> ${CALLS}\n[ "$1" = jlist ] && echo '[{"name":"shop","pm2_env":{"status":"online","restart_time":2},"monit":{"cpu":3,"memory":52428800}}]'\nexit 0\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(BIN, 'docker'), `#!/bin/sh\necho "docker $*" >> ${CALLS}\ncase "$1" in\n  info) exit 0 ;;\n  inspect) [ "$2" = "-f" ] && echo running && exit 0; exit 1 ;;\n  stats) echo '1.5%|20MiB / 256MiB' ;;\nesac\nexit 0\n`, { mode: 0o755 });
   execFileSync('git', ['init', '-q', '-b', 'main', REPO]);
   fs.writeFileSync(path.join(REPO, 'server.js'), 'require("http").createServer((q, s) => s.end("ok")).listen(process.env.PORT)\n');
   const g = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -193,6 +194,29 @@ test('deploy an app to the VPS over SSH: real clone into ~/apps, PM2 start, stat
   assert.equal((await ana.get(`/api/apps/${appId}/logs`)).status, 200);
   assert.equal((await bob.get(`/api/apps/${appId}`)).status, 403);
   assert.equal((await ana.get('/api/domains')).data.domains.length, 0, 'no automatic subdomain for VPS apps');
+});
+
+test('database on my VPS: docker run there, port on 127.0.0.1 of that server, no bill, stats + delete over SSH', async () => {
+  const r = await ana.post('/api/databases', { target: 'vps', serverId, name: 'anadb', engine: 'postgres', memoryMb: 256 });
+  assert.equal(r.status, 202, JSON.stringify(r.data));
+  const ready = await until(async () => { const d = (await ana.get('/api/databases')).data.databases.find((x) => x.name === 'anadb'); return d?.status === 'ready' || d?.status === 'error' ? d : null; });
+  assert.equal(ready.status, 'ready', ready.error);
+  assert.equal(ready.target, 'vps');
+  assert.equal(ready.serverName, 'my-vps');
+  const calls = fs.readFileSync(CALLS, 'utf8');
+  assert.match(calls, /docker run -d --name kdb-anadb --restart unless-stopped --env-file \S+ -p 127\.0\.0\.1:5432:5432 -v kdb-anadb-data:\/var\/lib\/postgresql\/data --label kapil\.cloud\.db=anadb --security-opt no-new-privileges --memory 256m postgres:17-alpine/);
+  const c = (await ana.get(`/api/databases/${ready.id}/credentials`)).data;
+  assert.match(c.url, /^postgresql:\/\/app:.+@127\.0\.0\.1:5432\/app$/);
+  assert.match(c.note, /On your VPS my-vps/);
+  const st = (await ana.get(`/api/databases/${ready.id}/stats`)).data;
+  assert.equal(st.state, 'running');
+  assert.equal(st.memory, 20 * 1048576);
+  assert.equal((await bob.get(`/api/databases/${ready.id}/credentials`)).status, 404);
+  assert.equal((await ana.get('/api/billing/me')).data.wallet.burnPerDay, 0, 'own server: no charge');
+  assert.equal((await ana.post(`/api/databases/${ready.id}/restart`)).status, 200);
+  const d = await ana.del(`/api/databases/${ready.id}`, { confirm: 'anadb' });
+  assert.equal(d.status, 200);
+  assert.match(fs.readFileSync(CALLS, 'utf8'), /docker rm -f kdb-anadb/);
 });
 
 test('a changed host key is refused until the server is connected again', async () => {

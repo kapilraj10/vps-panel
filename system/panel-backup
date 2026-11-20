@@ -41,7 +41,7 @@ const CT_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 // LXD rules for a new instance name: starts with a letter, no trailing dash
 const NEW_CT_RE = /^[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 const USER_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
-const DB_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}\.(?:sql|archive)\.gz$/;
+const DB_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}\.(?:sql|archive|rdb)\.gz$/;
 const DOCKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const TZ_RE = /^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+){0,2}$/;
@@ -66,6 +66,7 @@ const DEFAULTS = {
 // Fixed scripts run inside the database container (`docker exec <id> sh -c <script>`). Credentials come
 // from the container's own environment; nothing from the panel is ever put into these strings.
 const DUMPS = {
+  redis: { ext: 'rdb', script: 'export REDISCLI_AUTH="${REDIS_PASSWORD:-}"; exec redis-cli --rdb /dev/stdout' },
   postgres: { ext: 'sql', script: 'exec pg_dumpall -U "${POSTGRES_USER:-postgres}"' },
   mysql: {
     ext: 'sql',
@@ -269,6 +270,7 @@ function dbKind(image) {
   if (/^(postgres|postgresql|postgis|timescaledb|pgvector)/.test(base)) return 'postgres';
   if (/^(mysql|mariadb|percona)/.test(base)) return 'mysql';
   if (/^mongo(db)?(-|$)/.test(base)) return 'mongo';
+  if (/^(redis|valkey|redis-stack-server)$/.test(base)) return 'redis'; // not redis-commander, redisinsight, ...
   return null;
 }
 

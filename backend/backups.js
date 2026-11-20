@@ -27,7 +27,7 @@ const START_TIMEOUT_MS = 90_000;
 const ID_RE = /^\d{8}-\d{6}$/;
 const CT_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const NEW_CT_RE = /^[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
-const DB_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}\.(?:sql|archive)\.gz$/;
+const DB_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}\.(?:sql|archive|rdb)\.gz$/;
 const TARGETS = ['containers', 'host', 'databases', 'pm2'];
 const SUDO_PROBLEM = /a password is required|a terminal is required|not allowed to execute|may not run sudo|not in the sudoers|command not found/i;
 
