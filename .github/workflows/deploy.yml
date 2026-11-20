@@ -6,8 +6,9 @@
 # Both go through system/deploy.sh, which uses upgrade-panel.sh (automatic rollback if the new version fails).
 #
 # Repository secrets (Settings -> Secrets and variables -> Actions):
-#   DEPLOY_SSH_KEY        private key whose .pub is in kapil's ~/.ssh/authorized_keys on the server
-#   DEPLOY_KNOWN_HOSTS    output of: ssh-keyscan -t ed25519 ... (see docs/CICD.md)
+#   DEPLOY_SSH_KEY        private key whose .pub is in kapil's ~/.ssh/authorized_keys on the server;
+#                         easiest as one line: base64 -w0 ~/.ssh/kapil_cloud_deploy
+#   DEPLOY_KNOWN_HOSTS    optional: extra known_hosts lines (the server's host key is pinned in this file)
 #   CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET   only if ssh.gyannportal.com is ever put behind a Cloudflare Access policy
 name: Deploy
 on:
@@ -60,10 +61,28 @@ jobs:
           KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
           install -d -m 700 ~/.ssh
-          printf '%s\n' "$KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
-          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null 2>&1 || { echo "::error::DEPLOY_SSH_KEY is not a valid private key (paste the whole of ~/.ssh/kapil_cloud_deploy, BEGIN and END lines included)"; exit 1; }
-          ssh-keygen -F ssh.gyannportal.com -f ~/.ssh/known_hosts > /dev/null || { echo "::error::DEPLOY_KNOWN_HOSTS has no entry for ssh.gyannportal.com"; exit 1; }
+          # DEPLOY_SSH_KEY may be the key as it is (BEGIN ... END lines) or ONE line of base64:  base64 -w0 ~/.ssh/kapil_cloud_deploy
+          # Pasting problems are repaired: Windows line endings, literal \n, spaces around it.
+          K=$(printf '%s' "$KEY" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+          case "$K" in
+            *"BEGIN "*"PRIVATE KEY"*) printf '%s\n' "$K" | sed 's/\\n/\n/g' > ~/.ssh/deploy_key ;;
+            *) printf '%s' "$K" | tr -d ' \n' | base64 -d > ~/.ssh/deploy_key 2>/dev/null || true ;;
+          esac
+          chmod 600 ~/.ssh/deploy_key
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null 2>&1; then
+            # never print the key itself, only what kind of text it looks like
+            case "$K" in
+              ssh-ed25519*|ssh-rsa*) hint="that is the PUBLIC key (.pub); use the private one" ;;
+              "") hint="the secret is empty" ;;
+              *"BEGIN "*) hint="BEGIN line found but the key body is broken ($(printf '%s\n' "$K" | wc -l) lines)" ;;
+              *) hint="neither a key with BEGIN/END lines nor valid base64" ;;
+            esac
+            echo "::error::DEPLOY_SSH_KEY is not a usable private key ($hint). Easiest: on the dev PC run  base64 -w0 ~/.ssh/kapil_cloud_deploy  and paste that one line as the secret."
+            exit 1
+          fi
+          # The server's host key is public, so it is pinned here; DEPLOY_KNOWN_HOSTS (optional) can add or replace it.
+          printf '%s\n' "ssh.gyannportal.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEyqwU7L2fSz2jv1GcULW2mSgIJ9LyhPouEXyvEzF2s+" > ~/.ssh/known_hosts
+          [ -z "$KNOWN" ] || printf '%s\n' "$KNOWN" | tr -d '\r' >> ~/.ssh/known_hosts
       - name: Deploy
         if: steps.ready.outputs.ok == 'yes'
         env:
