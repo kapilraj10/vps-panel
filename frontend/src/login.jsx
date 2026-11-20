@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api, applyTheme } from './lib.jsx';
+import { Logo } from './brand.jsx';
+import { BILLING_LINE } from './landing.config.js';
 import './index.css';
 import './cloud.css';
 
@@ -25,7 +27,7 @@ function Register() {
       window.location.href = '/#/wallet';
     } catch (err) { setError(err.message); setBusy(false); }
   }
-  const brand = <div className="login__brand"><a href="/" className="login__home"><span className="brand__mark">S</span><span>Sampanna Cloud</span></a></div>;
+  const brand = <div className="login__brand"><a href="/" className="login__home" aria-label="Sampanna Cloud home"><Logo wordmark size={30} /></a></div>;
   if (pending) {
     return (
       <main className="login"><div className="panel form login__box">{brand}<h1>Account created</h1>
@@ -44,7 +46,7 @@ function Register() {
       <form className="panel form login__box" onSubmit={submit}>
         {brand}
         <h1>Create your account</h1>
-        <p className="top__meta">Deploy apps, servers and databases. Pay per day from a prepaid wallet{info?.signup.credit ? `, with ${info.currency} ${(info.signup.credit / 100).toFixed(0)} free credit to start` : ''}.</p>
+        <p className="top__meta">Deploy apps, servers and databases. {BILLING_LINE}{info?.signup.credit ? ` New accounts get ${info.currency} ${(info.signup.credit / 100).toFixed(0)} free credit.` : ''}</p>
         <label>Full name<input required autoFocus autoComplete="name" maxLength={100} value={f.fullName} onChange={set('fullName')} /></label>
         <label>Email<input required type="email" autoComplete="email" value={f.email} onChange={set('email')} /></label>
         <label>Username<input required autoComplete="username" autoCapitalize="none" spellCheck={false} pattern="[a-z][a-z0-9_\-]{1,31}" title="2-32 lowercase letters, digits, _ or -, starting with a letter" value={f.username} onChange={set('username')} /></label>
@@ -100,7 +102,7 @@ function Login() {
     return (
       <main className="login">
         <form className="panel form login__box" onSubmit={submitCode}>
-          <div className="login__brand"><span className="brand__mark">S</span><span>Sampanna Cloud</span></div>
+          <div className="login__brand"><a href="/" className="login__home" aria-label="Sampanna Cloud home"><Logo wordmark size={30} /></a></div>
           <h1>Two-factor code</h1>
           <p className="top__meta">Open your authenticator app and enter the 6-digit code for Sampanna Cloud ({username}). Lost your phone? Use a recovery code.</p>
           <label>Code
@@ -117,7 +119,7 @@ function Login() {
   return (
     <main className="login">
       <form className="panel form login__box" onSubmit={submit}>
-        <div className="login__brand"><span className="brand__mark">S</span><span>Sampanna Cloud</span></div>
+        <div className="login__brand"><a href="/" className="login__home" aria-label="Sampanna Cloud home"><Logo wordmark size={30} /></a></div>
         <h1>Sign in</h1>
         <p className="top__meta">Manage your servers, apps and domains.</p>
         <label>Username
