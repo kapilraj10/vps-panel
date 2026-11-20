@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { execInteractive } from './lxd.js';
 import { sessions, audit, settings } from './db.js';
 import { isAdmin, ownsContainer } from './auth.js';
+import { isAppHost } from './apphost.js';
 
 const MAX_PER_USER = 3;
 const MAX_INPUT = 64 * 1024;
@@ -41,6 +42,8 @@ export function createTerminal({ containers }) {
       if (!s) return reply({ error: 'Your session ended. Log in again.' });
       const name = typeof msg?.container === 'string' ? msg.container : '';
       if (!ownsContainer(s, name)) return reply({ error: 'You can only open a terminal on your own servers' });
+      // Managed hosting: customers never get a (root) shell in their app host; their apps run as an unprivileged user
+      if (!isAdmin(s) && isAppHost(name)) return reply({ error: 'The main server is managed hosting: use the app pages (logs, deploy, environment). For a shell, use a cloud server or your own VPS.' });
       if (!containers.exists(name)) return reply({ error: 'No such server' });
       const snap = containers.snapshot(name);
       if (snap?.status !== 'Running') return reply({ error: 'Start the server first' });

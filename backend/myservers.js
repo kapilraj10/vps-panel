@@ -34,6 +34,15 @@ const view = (r, admin) => {
 
 export function createMyServers({ io }) {
   const router = express.Router();
+  // At most 10 connection attempts with NEW credentials per user per hour: the panel must not become a password guesser
+  const attempts = new Map();
+  function limitAttempts(req) {
+    const now = Date.now();
+    const list = (attempts.get(req.session.id) || []).filter((t) => now - t < 3_600_000);
+    if (list.length >= 10) throw Object.assign(new Error('Too many connection attempts. Try again in an hour.'), { status: 429 });
+    list.push(now);
+    attempts.set(req.session.id, list);
+  }
   const who = (req) => ({ username: req.session.username, ip: clientIp(req) });
   const tasks = new Map(); // server id -> { kind, status, log, startedAt, finishedAt }
 
@@ -88,6 +97,7 @@ export function createMyServers({ io }) {
     if (db.prepare('SELECT COUNT(*) AS n FROM customer_servers WHERE user_id = ?').get(req.session.id).n >= MAX_PER_USER) throw conflict(`At most ${MAX_PER_USER} servers`);
     if (db.prepare('SELECT 1 FROM customer_servers WHERE user_id = ? AND name = ?').get(req.session.id, name)) throw conflict('You already have a server with that name');
     const creds = parseCreds(b);
+    limitAttempts(req);
     let result;
     try {
       result = await probe(creds);
@@ -118,6 +128,7 @@ export function createMyServers({ io }) {
     const name = b.name !== undefined ? str(b.name, { max: 40, name: 'Name', re: NAME_RE }) : r.name;
     const creds = parseCreds(b, r);
     if (creds.host !== r.host || creds.port !== r.port) throw bad('To move to another address, add it as a new server');
+    limitAttempts(req);
     const result = await probe({ ...creds, hostKey: r.host_key });
     db.prepare('UPDATE customer_servers SET name = ?, username = ?, auth_type = ?, secret_enc = ?, facts = ?, status = ?, last_error = NULL, last_check_at = ?, updated_at = ? WHERE id = ?')
       .run(name, creds.username, creds.authType, seal(creds.secret), JSON.stringify(result.facts), 'online', Date.now(), Date.now(), r.id);

@@ -271,6 +271,7 @@ test('main server target: hosting package, app host sized by it, max apps, non-r
   const execs = lxd.calls.filter((c) => c.path === '/1.0/instances/apps-bob/exec');
   assert.ok(execs.length >= 2 && execs.every((c) => c.body.environment.RUN_AS === 'app'), JSON.stringify(execs.map((c) => [c.body.command.slice(0, 2).join(' ').slice(0, 60), c.body.environment.RUN_AS, Object.keys(c.body.environment)])));
   assert.equal((await bob.get('/api/containers/apps-bob')).status, 200, 'bob reaches his app host');
+  assert.equal((await bob.get('/api/servers/apps-bob/tools/pm2')).status, 403, 'no root tools in managed hosting');
   assert.equal((await ana.get(`/api/apps/${id}`)).status, 403);
   assert.equal((await bob.del('/api/containers/apps-bob', { confirm: 'apps-bob', stopFirst: true })).status, 403, 'not deletable as a server');
   assert.equal((await bob.post('/api/apps', { container: 'apps-bob', name: 'x2', type: 'node', repoUrl: 'https://github.com/x/y.git' })).status, 400);

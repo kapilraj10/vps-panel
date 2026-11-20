@@ -23,6 +23,8 @@ test('existing branch passes, missing branch and missing repository are refused 
   assert.deepEqual(await checkRepo(repo, 'main'), { checked: true });
   await assert.rejects(checkRepo(repo, 'nope'), /Branch "nope" was not found/);
   await assert.rejects(checkRepo(path.join(tmp, 'missing'), 'main'), (e) => e.status === 400);
+  await assert.rejects(checkRepo('https://127.0.0.1/x.git', 'main', '', { publicOnly: true }), /private or reserved/, 'customers cannot make the panel probe internal hosts');
+  await assert.rejects(checkRepo('https://10.10.10.31/x.git', 'main', '', { publicOnly: true }), /private or reserved/);
   process.env.GIT_CHECK = 'off';
   assert.deepEqual(await checkRepo('https://example.invalid/x.git', 'main'), { checked: false });
   fs.rmSync(tmp, { recursive: true, force: true });

@@ -173,6 +173,9 @@ test('connect a VPS: verified before saving, secrets never returned, private to 
   assert.equal((await bob.get('/api/my-servers')).data.servers.length, 0);
   assert.equal((await sup.get('/api/my-servers')).data.servers[0].owner, 'ana', 'admins see all');
   assert.ok(seen.every((c) => c === 'bash -s'), 'only `bash -s`; values travel on stdin');
+  // attempts with new credentials are limited per user (10 per hour), so the panel cannot be used to guess passwords
+  for (let i = 0; i < 10; i += 1) assert.equal((await bob.post('/api/my-servers', { ...vps, name: `x${i}`, password: 'wrong' })).status, 400);
+  assert.equal((await bob.post('/api/my-servers', { ...vps, name: 'x10', password: VPS_PW })).status, 429);
 });
 
 test('deploy an app to the VPS over SSH: real clone into ~/apps, PM2 start, stats, logs', async () => {

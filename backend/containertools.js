@@ -9,6 +9,7 @@ import express from 'express';
 import { audit } from './db.js';
 import { execStream } from './lxd.js';
 import { clientIp, isAdmin, ownsContainer } from './auth.js';
+import { isAppHost } from './apphost.js';
 import { wrap, bad, forbidden, notFound, conflict, int } from './http.js';
 import { passwordProblem } from './users.js';
 import { RUNTIME_SCRIPT } from './apps.js';
@@ -198,6 +199,7 @@ export function createContainerTools({ containers }) {
     const name = req.params.name;
     if (!ownsContainer(req.session, name)) throw forbidden('You can only manage your own servers');
     if (!containers.exists(name)) throw notFound('No such server');
+    if (!isAdmin(req.session) && isAppHost(name)) throw forbidden('The main server is managed hosting: these root tools are not available there');
     if (!isAdmin(req.session) && containers.facts(name)?.privileged) throw forbidden('This server runs privileged, so these tools are disabled for it. Ask the admin.');
     if (containers.snapshot(name)?.status !== 'Running') throw conflict('Start the server first');
     return name;

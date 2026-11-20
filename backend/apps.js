@@ -12,7 +12,7 @@ import { roomFor } from './containers.js';
 import { wrap, bad, forbidden, notFound, conflict, int, str } from './http.js';
 import { plans } from './billing.js';
 import { cfConfigured, removeRoute } from './cloudflare.js';
-import { sshRun } from './sshexec.js';
+import { sshRun, resolvePublic } from './sshexec.js';
 import { customerServers } from './myservers.js';
 
 const APP_NAME_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/;
@@ -170,8 +170,10 @@ const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
 // Can the panel see this repository and branch (with the token, if any)? Runs `git ls-remote` from the panel host
 // before anything is saved, so a typo or a missing token fails at once instead of in the middle of a deploy.
 // GIT_CHECK=off skips it (tests, offline installs). A network failure does not block: the deploy log will show it.
-export function checkRepo(repo, branch, token = '') {
-  if (process.env.GIT_CHECK === 'off') return Promise.resolve({ checked: false });
+export async function checkRepo(repo, branch, token = '', { publicOnly = false } = {}) {
+  if (process.env.GIT_CHECK === 'off') return { checked: false };
+  // Customers: the panel only talks to public Git hosts (no probing of the LXD bridge, localhost, metadata)
+  if (publicOnly && /^https?:/.test(repo)) await resolvePublic(new URL(repo).hostname).catch((err) => { throw bad(`Repository host: ${err.message}`); });
   const args = [];
   if (token) args.push('-c', `http.extraHeader=Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`);
   args.push('ls-remote', '--heads', '--', repo, branch);
@@ -393,7 +395,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     if (!APP_NAME_RE.test(name)) throw bad('App name: 3-32 lowercase letters, digits or dashes');
     const v = validate(b);
     if (db.prepare('SELECT 1 FROM apps WHERE container = ? AND name = ?').get(container, name)) throw conflict(`${name} already exists on ${container}`);
-    await checkRepo(v.repo, v.branch, b.gitToken);
+    await checkRepo(v.repo, v.branch, b.gitToken, { publicOnly: !isAdmin(req.session) });
     if (db.prepare('SELECT 1 FROM apps WHERE container = ? AND port = ?').get(container, v.port)) throw conflict(`Port ${v.port} is already used by another app on ${container}`);
     const env = parseEnv(b.env);
     const ownerId = isAdmin(req.session) ? (users.ownersOf(container)[0]?.id || req.session.id) : req.session.id;
@@ -422,7 +424,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
       envEnc = seal(JSON.stringify(next));
     }
     const tokenEnc = b.gitToken === '' ? null : b.gitToken ? seal(String(b.gitToken).slice(0, 500)) : a.git_token_enc;
-    if (v.repo !== a.repo_url || v.branch !== a.branch || b.gitToken) await checkRepo(v.repo, v.branch, open(tokenEnc) || '');
+    if (v.repo !== a.repo_url || v.branch !== a.branch || b.gitToken) await checkRepo(v.repo, v.branch, open(tokenEnc) || '', { publicOnly: !isAdmin(req.session) });
     db.prepare(`UPDATE apps SET repo_url = ?, branch = ?, root_dir = ?, output_dir = ?, install_cmd = ?, build_cmd = ?, start_cmd = ?, port = ?,
         env_enc = ?, git_token_enc = ?, updated_at = ? WHERE id = ?`)
       .run(v.repo, v.branch, v.rootDir, v.outputDir, v.installCmd, v.buildCmd, v.startCmd, v.port, envEnc, tokenEnc, Date.now(), a.id);
@@ -539,7 +541,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     if (b.port && used.has(port)) throw conflict(`Port ${port} is already used by another app on ${srv.name}`);
     while (used.has(port)) port += 1;
     const v = validate({ ...b, port });
-    await checkRepo(v.repo, v.branch, b.gitToken);
+    await checkRepo(v.repo, v.branch, b.gitToken, { publicOnly: !isAdmin(req.session) });
     const env = parseEnv(b.env);
     const now = Date.now();
     const id = Number(db.prepare(`INSERT INTO apps (user_id, container, name, type, repo_url, branch, root_dir, output_dir, install_cmd, build_cmd, start_cmd,
@@ -582,7 +584,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
       const room = await appHost.checkRoom(user, plan);
       if (room) return res.status(409).json({ error: `The main server has no room for this package right now. ${room}` });
     }
-    await checkRepo(v.repo, v.branch, b.gitToken);
+    await checkRepo(v.repo, v.branch, b.gitToken, { publicOnly: !isAdmin(req.session) });
     const env = parseEnv(b.env);
     const now = Date.now();
     const id = Number(db.prepare(`INSERT INTO apps (user_id, container, name, type, repo_url, branch, root_dir, output_dir, install_cmd, build_cmd, start_cmd,

@@ -62,4 +62,30 @@ working code; each phase extends it and keeps the e2e tests green.
 | 6 Managed databases | ✅ Redis engine (password via env, AOF), databases on the customer's VPS (Docker there, 127.0.0.1, docker group or sudo), live CPU/RAM per database, Download dump (fresh, gzip), Restore from an uploaded .sql/.archive(.gz) with typed confirmation (PostgreSQL/MySQL/MongoDB), Redis in nightly dumps. Plain admins read; owner or super admin act |
 | 7 Billing + monitoring | ✅ monthly invoices in Nepal time (idempotent, printable), month-so-far statement, admin alerts (dashboard + webhook) when a wallet runs out / services stop, low-balance / grace / stopped banner for customers, hosting package card with upgrade, super admin moves apps between main server / customer VPS / cloud server. Live CPU/RAM per app and per database (phases 4, 6) |
 | 8 Domains + SSL | ✅ custom domains: TXT `_sampanna-verify.<host>` proves ownership before an admin can route it; DNS instructions with copy buttons; domains for apps on any target incl. the customer's VPS (A record checked, SSL by certbot there); platform subdomains auto-routed with Cloudflare SSL (earlier); migration 10. Test: fake DNS server (`test/fake-dns.js`) |
-| 9 Tests, security review, docs | |
+| 9 Tests, security review, docs | ✅ see below; API in `docs/API.md`; new env settings in `backend/.env.example` |
+
+## Security review (phase 9)
+
+| Risk | Control |
+|---|---|
+| Tenant data leaks | Every route checks ownership (`ownsContainer` or `user_id`), other tenants' rows answer 404/403; tests try cross-tenant access for apps, databases, VPS, domains, credentials |
+| Root execution of customer code | Main-server apps run as user `app` (runuser) in an unprivileged LXD container per customer; terminal and container tools are refused there for customers |
+| Command injection | Scripts are fixed text; values travel as environment / `export NAME='quoted'` lines on stdin; `scripts.test.js` runs an injection attempt through the branch name |
+| SSRF through the panel | Customer VPS and repository hosts must resolve to public addresses (no LXD bridge, localhost, link-local/metadata, CGNAT); the checked address is the one connected to |
+| Password guessing via "Connect a VPS" | 10 attempts with new credentials per customer per hour; all attempts audited |
+| Stolen credentials | SSH keys/passwords, DB passwords, git tokens, env values sealed with AES-256-GCM; never returned except DB credentials to the owner (audited) |
+| Man-in-the-middle to a customer VPS | Host key pinned on first connect; a different key is refused (`host_key_changed`) |
+| Double charging | Settlement only moves `billed_until` if it is unchanged (`billing-unit.test.js`); invoices unique per user + month |
+| Unpaid services | Grace period, then stop — never delete; resume after top-up |
+| Domain hijack | Custom domains need a TXT proof before an admin can route them |
+| Open sign-up abuse | Per-IP limit, honeypot, unique email, reserved names, empty wallet (nothing runs without money), optional admin approval |
+
+Known limits: Docker apps on the main server need nesting in that customer's app host (still unprivileged); apps on a
+customer VPS are reached on the VPS's own address (the panel does not proxy them); live usage of VPS apps opens an
+SSH connection per refresh.
+
+## Deploying this
+
+Migrations 7–10 run by themselves on the first start (a copy of the database is made first). On the server also:
+re-run `sudo system/install-backups.sh` (Redis and in-container database dumps), make sure `git` and the `docker` CLI
+are installed for the panel user, and set `CF_API_TOKEN` / `CF_ACCOUNT_ID` / `CF_TUNNEL_ID` for automatic subdomains.
