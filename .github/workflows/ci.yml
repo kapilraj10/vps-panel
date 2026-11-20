@@ -15,14 +15,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: |
             backend/package-lock.json
             frontend/package-lock.json
+      # The panel serves the built pages (landing, login) and the e2e tests request them: build the frontend first
+      - name: Frontend build
+        run: npm ci --no-audit --no-fund && npm run build
+        working-directory: frontend
       - name: Backend dependencies
         run: npm ci --no-audit --no-fund
         working-directory: backend
@@ -33,6 +37,3 @@ jobs:
         working-directory: backend
       - name: Helper tests (backup, security, upgrade)
         run: node --test system/test/*.cjs
-      - name: Frontend build
-        run: npm ci --no-audit --no-fund && npm run build
-        working-directory: frontend
