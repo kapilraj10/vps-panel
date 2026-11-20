@@ -567,27 +567,55 @@ function linkDestFor(prev) {
   return fs.existsSync(dir) ? dir : null;
 }
 
-function detectDatabases(ctx) {
-  let raw;
-  try {
-    raw = capture('docker', ['ps', '--no-trunc', '--format', '{{json .}}']);
-  } catch (err) {
-    if (/Cannot run docker: .*ENOENT/.test(err.message)) {
-      ctx.log('Docker is not installed: no databases to dump');
-      return [];
-    }
-    throw err;
-  }
+// `docker ps --format '{{json .}}'` output -> database containers we know how to dump
+function parseDockerPs(raw) {
   const dbs = [];
-  for (const line of raw.split('\n')) {
+  for (const line of String(raw).split('\n')) {
     if (!line.trim()) continue;
-    const c = JSON.parse(line);
+    let c;
+    try { c = JSON.parse(line); } catch { continue; }
     const kind = dbKind(c.Image);
     if (!kind || !/^[0-9a-f]{12,64}$/.test(c.ID)) continue;
     const first = String(c.Names || '').split(',')[0];
     dbs.push({ id: c.ID, name: DOCKER_NAME_RE.test(first) ? first : c.ID.slice(0, 12), kind, image: c.Image });
   }
   return dbs;
+}
+
+// Dump file name; databases inside an LXD container carry its name first ("<server>--<db>-<kind>.sql.gz")
+const dumpFileName = (db) => `${db.lxd ? `${db.lxd}--` : ''}${db.name}-${db.kind}.${DUMPS[db.kind].ext}.gz`;
+
+function detectDatabases(ctx) {
+  let raw;
+  try {
+    raw = capture('docker', ['ps', '--no-trunc', '--format', '{{json .}}']);
+  } catch (err) {
+    if (/Cannot run docker: .*ENOENT/.test(err.message)) {
+      ctx.log('Docker is not installed on the host: no host databases to dump');
+      return [];
+    }
+    throw err;
+  }
+  return parseDockerPs(raw);
+}
+
+// Databases users create from a server's Databases page run in Docker INSIDE that LXD container. The container
+// export alone copies their files while they are being written, so they get a proper dump too.
+const INNER_PS = 'command -v docker >/dev/null 2>&1 || exit 0; docker ps --no-trunc --format "{{json .}}"';
+function detectContainerDatabases(ctx) {
+  let names;
+  try { names = listContainers(ctx); } catch (err) { ctx.log(`Cannot list LXD containers for database dumps: ${err.message}`); return []; }
+  const out = [];
+  for (const ct of names) {
+    try {
+      const st = JSON.parse(capture('lxc', ['query', `/1.0/instances/${ct}/state`]));
+      if (st.status !== 'Running') continue;
+      for (const db of parseDockerPs(capture('lxc', ['exec', ct, '-T', '--', 'sh', '-c', INNER_PS]))) out.push({ ...db, lxd: ct });
+    } catch (err) {
+      ctx.log(`  could not look for databases inside ${ct}: ${err.message}`);
+    }
+  }
+  return out;
 }
 
 async function checkSpace(ctx, prev) {
@@ -668,36 +696,49 @@ async function backupPm2(ctx) {
 }
 
 async function backupDatabases(ctx) {
-  const dbs = detectDatabases(ctx);
+  const dbs = [...detectDatabases(ctx), ...detectContainerDatabases(ctx)];
   if (!dbs.length) {
-    ctx.log('No Postgres, MySQL/MariaDB or MongoDB containers are running in Docker');
+    ctx.log('No Postgres, MySQL/MariaDB or MongoDB containers are running in Docker (host or inside LXD servers)');
     return;
   }
   const final = path.join(BACKUP_ROOT, 'databases', ctx.id);
   const partial = `${final}.partial`;
+  const failed = [];
   for (const [i, db] of dbs.entries()) {
-    const { ext, script } = DUMPS[db.kind];
-    const file = `${db.name}-${db.kind}.${ext}.gz`;
-    const args = ['exec', db.id, 'sh', '-c', script];
+    const { script } = DUMPS[db.kind];
+    const file = dumpFileName(db);
+    const where = db.lxd ? `${db.name} in server ${db.lxd}` : db.name;
+    const args = db.lxd ? ['exec', db.lxd, '-T', '--', 'docker', 'exec', db.id, 'sh', '-c', script] : ['exec', db.id, 'sh', '-c', script];
+    const cmd = db.lxd ? 'lxc' : 'docker';
     if (ctx.dryRun) {
-      ctx.log(`Would run: ${fmtCmd('docker', ['exec', db.name, 'sh', '-c', script])} | gzip > ${final}/${file}`);
+      ctx.log(`Would run: ${fmtCmd(cmd, args)} | gzip > ${final}/${file}`);
       continue;
     }
-    if (i === 0) {
+    if (!fs.existsSync(partial)) {
       fs.mkdirSync(partial, { recursive: true });
       ctx.partials.push(partial);
     }
-    ctx.progress(i / dbs.length, `Dumping ${db.kind} in ${db.name}`);
-    ctx.log(`Dumping ${db.kind} database container ${db.name} (${db.image})`);
-    const r = await streamToFile('docker', args, path.join(partial, file), ctx.log, { gzip: true });
-    if (!r.raw) throw new Error(`The dump of ${db.name} was empty`);
-    ctx.artifacts.push({ kind: 'database', name: db.name, path: `databases/${ctx.id}/${file}`, size: r.size, sha256: r.sha256 });
-    ctx.databases.push({ file, container: db.name, kind: db.kind });
-    ctx.sizes.databases += r.size;
-    ctx.size += r.size;
-    ctx.log(`  ${file}: ${fmtBytes(r.size)} (${fmtBytes(r.raw)} before gzip)`);
+    ctx.progress(i / dbs.length, `Dumping ${db.kind} in ${where}`);
+    ctx.log(`Dumping ${db.kind} database container ${where} (${db.image})`);
+    try {
+      const r = await streamToFile(cmd, args, path.join(partial, file), ctx.log, { gzip: true });
+      if (!r.raw) throw new Error(`The dump of ${where} was empty`);
+      ctx.artifacts.push({ kind: 'database', name: db.name, path: `databases/${ctx.id}/${file}`, size: r.size, sha256: r.sha256 });
+      ctx.databases.push({ file, container: db.name, kind: db.kind, ...(db.lxd ? { server: db.lxd } : {}) });
+      ctx.sizes.databases += r.size;
+      ctx.size += r.size;
+      ctx.log(`  ${file}: ${fmtBytes(r.size)} (${fmtBytes(r.raw)} before gzip)`);
+    } catch (err) {
+      // A host database failing fails the backup (as before). One inside a user's server is reported and skipped,
+      // so a broken user container never stops everyone else's backup.
+      if (!db.lxd) throw err;
+      fs.rmSync(path.join(partial, file), { force: true });
+      failed.push(`${where}: ${err.message.slice(0, 200)}`);
+      ctx.log(`  WARNING: dump of ${where} failed: ${err.message}`);
+    }
   }
-  if (!ctx.dryRun) ctx.renames.push([partial, final]);
+  if (failed.length) ctx.warnings.push(`Some databases inside servers were not dumped: ${failed.join('; ')}`);
+  if (!ctx.dryRun && fs.existsSync(partial)) ctx.renames.push([partial, final]);
 }
 
 async function backupContainers(ctx) {
@@ -898,7 +939,7 @@ async function cmdRun(_pos, opts) {
   let lastSave = 0;
   const ctx = {
     id, config, targets, dryRun, log, job, trigger, by, disk: null, stepIndex: 0, totalSteps: 1,
-    renames: [], partials: [], artifacts: [], containers: [], databases: [], host: null, size: 0,
+    renames: [], partials: [], artifacts: [], containers: [], databases: [], host: null, size: 0, warnings: [],
     sizes: { containers: {}, databases: 0, pm2: 0, hostNew: 0 },
     progress(frac, phase) {
       if (!job) return;
@@ -947,9 +988,10 @@ async function cmdRun(_pos, opts) {
     try {
       pruneRuns(ctx);
     } catch (err) {
-      job.warning = `Backup is good, but removing old backups failed: ${err.message}`;
-      log(job.warning);
+      ctx.warnings.push(`Backup is good, but removing old backups failed: ${err.message}`);
+      log(ctx.warnings.at(-1));
     }
+    if (ctx.warnings.length) job.warning = ctx.warnings.join(' | ').slice(0, 1000);
     Object.assign(job, { status: 'success', phase: 'Done', progress: 100, finishedAt: Date.now(), size: ctx.size });
     saveJob(job);
     log(`Backup ${id} finished: ${fmtBytes(ctx.size)} of new data in ${Math.round((job.finishedAt - job.startedAt) / 1000)}s`);
@@ -1317,7 +1359,7 @@ async function main(argv) {
 }
 
 module.exports = {
-  normalizeConfig, keepNewerKeys, planRetention, splitSafePath, makeId, isoWeek, dbKind, rsyncArgs, pickTargets, checkHostPath, onCalendar,
+  normalizeConfig, keepNewerKeys, planRetention, splitSafePath, makeId, isoWeek, dbKind, parseDockerPs, dumpFileName, rsyncArgs, pickTargets, checkHostPath, onCalendar,
   DEFAULTS, ID_RE, CT_RE, NEW_CT_RE, DB_FILE_RE,
 };
 

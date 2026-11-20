@@ -4,18 +4,19 @@ import { api, ago, Dialog } from '../lib.jsx';
 import { useLive } from '../live.js';
 import { PageHeader, Card, Badge, Empty, SkeletonRows, ErrorNote, Field, Icon, Note, Stat, Copy, useApi, useAction, useConfirm } from '../ui.jsx';
 import { LogDialog } from './Pm2Page.jsx';
+import { fmtMoney } from './Billing.jsx';
 
 const BUSY = ['queued', 'pulling', 'creating'];
 const STATE = { running: 'good', exited: 'neutral', restarting: 'warn', paused: 'warn', dead: 'bad' };
 
-function NewDatabase({ options, onClose, onDone }) {
+function NewDatabase({ options, onClose, onDone, self = false }) {
   const run = useAction();
-  const [f, setF] = useState({ name: '', engine: 'postgres', version: '', dbName: 'app', user: 'app', access: 'local', memoryMb: '', notes: '' });
+  const [f, setF] = useState({ name: '', engine: 'postgres', version: '', dbName: 'app', user: 'app', access: self ? 'containers' : 'local', memoryMb: '', notes: '', planId: '' });
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value, ...(k === 'engine' ? { version: '' } : {}) });
   const eng = options.engines[f.engine];
   async function submit(e) {
     e.preventDefault();
-    const body = { ...f, version: f.version || eng.versions[0], memoryMb: f.memoryMb ? Number(f.memoryMb) : undefined };
+    const body = { ...f, version: f.version || eng.versions[0], memoryMb: f.memoryMb ? Number(f.memoryMb) : undefined, planId: f.planId ? Number(f.planId) : undefined };
     if (await run(() => api('/api/databases', { method: 'POST', body }), `${f.name}: creating (first time downloads the image, a few minutes)`)) { onDone(); onClose(); }
   }
   return (
@@ -29,11 +30,19 @@ function NewDatabase({ options, onClose, onDone }) {
           <Field label="Version"><select value={f.version || eng.versions[0]} onChange={set('version')}>{eng.versions.map((v) => <option key={v}>{v}</option>)}</select></Field>
           <Field label="Database name"><input required pattern="[a-z_][a-z0-9_]{0,30}" value={f.dbName} onChange={set('dbName')} /></Field>
           <Field label={f.engine === 'mongo' ? 'Admin user' : 'User'}><input required pattern="[a-z_][a-z0-9_]{0,30}" value={f.user} onChange={set('user')} /></Field>
-          <Field label="Memory limit (MB)" hint="Empty = no limit"><input type="number" min={128} value={f.memoryMb} onChange={set('memoryMb')} placeholder="1024" /></Field>
+          {self ? (
+            <Field label="Plan" hint="Charged by the hour from your wallet">
+              <select required value={f.planId} onChange={set('planId')}><option value="">Pick a plan</option>
+                {options.plans.map((p) => <option key={p.id} value={p.id}>{p.name}: {p.memoryMb} MB RAM, {fmtMoney(p.priceDay)}/day</option>)}</select>
+            </Field>
+          ) : <Field label="Memory limit (MB)" hint="Empty = no limit"><input type="number" min={128} value={f.memoryMb} onChange={set('memoryMb')} placeholder="1024" /></Field>}
         </div>
-        <Field label="Who can connect" wide>
-          <select value={f.access} onChange={set('access')}>{options.access.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}</select>
-        </Field>
+        {!self && (
+          <Field label="Who can connect" wide>
+            <select value={f.access} onChange={set('access')}>{options.access.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}</select>
+          </Field>
+        )}
+        {self && <Note>Your servers reach it on the private network address shown under Connect. It is never open to the internet.</Note>}
         <Field label="Notes" wide><input maxLength={300} value={f.notes} onChange={set('notes')} placeholder="Used by the shop API" /></Field>
         <Note>A strong password is generated and stored encrypted. The port is never opened to the internet. Daily backups include it automatically (Backups → Databases).</Note>
         <div className="dialog__buttons"><button type="button" className="btn" onClick={onClose}>Cancel</button><button type="submit" className="btn btn--primary">Create</button></div>
@@ -73,7 +82,8 @@ function Credentials({ db, onClose }) {
 
 export default function Databases() {
   const { me } = useLive();
-  const sup = me.role === 'super_admin';
+  const self = !me.isAdmin;
+  const sup = me.role === 'super_admin' || self; // users manage their own databases
   const run = useAction();
   const confirm = useConfirm();
   const { data, error, reload } = useApi('/api/databases', { interval: 5000 });
@@ -100,7 +110,7 @@ export default function Databases() {
   const by = (e) => list.filter((d) => d.engine === e).length;
   return (
     <>
-      <PageHeader title="Databases" sub="PostgreSQL, MySQL and MongoDB on this server (Docker)"
+      <PageHeader title={self ? 'Managed databases' : 'Databases'} sub={self ? 'PostgreSQL, MySQL and MongoDB run for you on the cloud, backed up every night, billed per day' : 'PostgreSQL, MySQL and MongoDB on this server (Docker)'}
         actions={sup && options.data && <button type="button" className="btn btn--primary" onClick={() => setCreating(true)}><Icon name="plus" /> New database</button>} />
       <div className="kpis">
         <Stat label="Databases" icon="storage" value={data ? list.length : null} sub={data ? `${list.filter((d) => d.state === 'running').length} running` : ''} />
@@ -151,7 +161,7 @@ export default function Databases() {
         )}
       </Card>
       <Note>Apps on this server connect to <code>127.0.0.1:&lt;port&gt;</code>. Apps inside LXD containers need a database created with “LXD containers” access and connect to the bridge address. To reach a database from your laptop, use an SSH tunnel: <code>ssh -L 5432:127.0.0.1:&lt;port&gt; kapil@ssh.your-domain</code>.</Note>
-      {creating && options.data && <NewDatabase options={options.data} onClose={() => setCreating(false)} onDone={reload} />}
+      {creating && options.data && <NewDatabase self={self} options={options.data} onClose={() => setCreating(false)} onDone={reload} />}
       {creds && <Credentials db={creds} onClose={() => setCreds(null)} />}
       {logs && <LogDialog title={`Logs: ${logs.name}`} url={`/api/databases/${logs.id}/logs`} onClose={() => setLogs(null)} />}
     </>

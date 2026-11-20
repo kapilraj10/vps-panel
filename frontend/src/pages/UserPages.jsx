@@ -45,9 +45,14 @@ export function MyBackups() {
         {!runs.data ? <div className="pad"><SkeletonRows /></div> : runs.data.error ? <div className="pad"><Note tone="warn">Backups are not available right now: {runs.data.error}</Note></div>
           : runs.data.runs.length ? (
             <div className="table-wrap"><table className="table">
-              <thead><tr><th>Backup</th><th>Servers</th><th>Kind</th><th>Verified</th></tr></thead>
+              <thead><tr><th>Backup</th><th>Servers</th><th>Database dumps</th><th>Kind</th><th>Verified</th></tr></thead>
               <tbody>{runs.data.runs.map((r) => (
-                <tr key={r.id}><td>{dateTime(r.startedAt)}<small className="block muted">{r.id}</small></td><td>{r.containers.join(', ')}</td><td className="muted">{r.trigger}</td>
+                <tr key={r.id}><td>{dateTime(r.startedAt)}<small className="block muted">{r.id}</small></td><td>{r.containers.join(', ') || '–'}</td>
+                  <td>{r.databases?.length ? r.databases.map((d) => (
+                    <a key={d.file} className="block" href={`/api/my-backups/runs/${encodeURIComponent(r.id)}/db/${encodeURIComponent(d.file)}`} download>
+                      {d.server}/{d.container} <span className="muted">({d.kind})</span></a>
+                  )) : <span className="muted">none</span>}</td>
+                  <td className="muted">{r.trigger}</td>
                   <td>{r.verify ? <Badge tone={r.verify.ok ? 'good' : 'bad'}>{r.verify.ok ? `checked ${ago(r.verify.at)}` : 'problem found'}</Badge> : <span className="muted">not yet</span>}</td></tr>
               ))}</tbody>
             </table></div>

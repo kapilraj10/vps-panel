@@ -457,6 +457,59 @@ const MIGRATIONS = [
       ALTER TABLE users ADD COLUMN totp_recovery TEXT;
     `,
   },
+  {
+    version: 7,
+    name: 'billing: plans, prepaid wallets, billed resources; database owners',
+    sql: `
+      CREATE TABLE plans (
+        id          INTEGER PRIMARY KEY,
+        kind        TEXT NOT NULL CHECK (kind IN ('server', 'database')),
+        name        TEXT NOT NULL,
+        cpu         INTEGER,
+        memory_mb   INTEGER,
+        disk_gb     INTEGER,
+        price_day   INTEGER NOT NULL,
+        active      INTEGER NOT NULL DEFAULT 1,
+        sort        INTEGER NOT NULL DEFAULT 0,
+        description TEXT,
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        UNIQUE (kind, name)
+      );
+      CREATE TABLE billed_resources (
+        id           INTEGER PRIMARY KEY,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kind         TEXT NOT NULL CHECK (kind IN ('server', 'database')),
+        name         TEXT NOT NULL,
+        plan_id      INTEGER REFERENCES plans(id) ON DELETE SET NULL,
+        price_day    INTEGER NOT NULL,
+        started_at   INTEGER NOT NULL,
+        ended_at     INTEGER,
+        billed_until INTEGER NOT NULL,
+        charged      INTEGER NOT NULL DEFAULT 0,
+        carry        REAL NOT NULL DEFAULT 0,
+        paused       INTEGER NOT NULL DEFAULT 0,
+        created_by   TEXT
+      );
+      CREATE UNIQUE INDEX billed_resources_active ON billed_resources(kind, name) WHERE ended_at IS NULL;
+      CREATE INDEX billed_resources_user ON billed_resources(user_id, ended_at);
+      CREATE TABLE wallet_tx (
+        id          INTEGER PRIMARY KEY,
+        user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        amount      INTEGER NOT NULL,
+        kind        TEXT NOT NULL CHECK (kind IN ('topup', 'charge', 'refund', 'adjust')),
+        resource_id INTEGER,
+        note        TEXT,
+        by_user     TEXT,
+        created_at  INTEGER NOT NULL
+      );
+      CREATE INDEX wallet_tx_user ON wallet_tx(user_id, id);
+      ALTER TABLE users ADD COLUMN balance INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE users ADD COLUMN billing_state TEXT;
+      ALTER TABLE users ADD COLUMN billing_grace_since INTEGER;
+      ALTER TABLE databases ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+    `,
+  },
 ];
 
 function migrate() {
@@ -636,6 +689,13 @@ export const SETTING_DEFAULTS = {
   alert_packet_loss: 5, // percent
   require_2fa_admins: false, // admins without two-factor login can only reach their account page until they set it up
   notify_webhook_url: '', // POSTed JSON for every new critical/warning alert (Slack/Discord/ntfy-compatible text field)
+  // Billing (prepaid wallets; money in paisa)
+  billing_enabled: true,
+  billing_currency: 'NPR',
+  billing_grace_hours: 24, // after the balance hits 0, services keep running this long before they are stopped
+  billing_min_days: 1, // a new server/database needs balance for this many days of everything the user runs
+  billing_low_days: 3, // "low balance" warning below this many days left
+  billing_rates: { cpuDay: 0, ramGbDay: 0, diskGbDay: 0, dbDay: 0 }, // AWS-style per-resource prices, suggested for plans
 }
 
 export const settings = {

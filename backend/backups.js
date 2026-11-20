@@ -524,16 +524,32 @@ export function createBackups({ io, containers, onJobFinished = () => {} }) {
     res.set('Cache-Control', 'no-store');
     res.json({
       error,
-      runs: runs.filter((r) => r.containers.some((c) => mine.has(c))).map((r) => {
+      runs: runs.filter((r) => r.containers.some((c) => mine.has(c)) || myDumps(r, mine).length).map((r) => {
         const row = backupJobs.get(r.id);
         return {
           id: r.id, startedAt: r.startedAt, finishedAt: r.finishedAt, trigger: r.trigger,
           containers: r.containers.filter((c) => mine.has(c)),
+          databases: myDumps(r, mine).map((d) => ({ file: d.file, server: d.server, container: d.container, kind: d.kind })),
           verify: row?.verify_result ? { at: row.verified_at, ...parse(row.verify_result, {}) } : null,
         };
       }),
     });
   }));
+
+  // Dumps of databases that ran inside one of the user's own servers
+  const myDumps = (r, mine) => (r.databases || []).filter((d) => d.server && mine.has(d.server));
+
+  userRouter.get('/runs/:id/db/:file', wrap(async (req, res) => {
+    const id = checkId(req.params.id);
+    const { file } = req.params;
+    if (!DB_FILE_RE.test(file)) throw new HelperError('Invalid dump name', 400);
+    const mine = new Set(req.session.containers);
+    const run = ((await helper(['list'], { timeout: 60_000 })).runs || []).find((r) => r.id === id);
+    if (!run || !myDumps(run, mine).some((d) => d.file === file)) return res.status(404).json({ error: 'No such database dump in your backups' });
+    const { username, ip } = who(req);
+    return streamDownload(req, res, ['db-download', id, file], file, { username, ip, action: 'backup_db_download', target: `${id}:${file}` });
+  }));
+  userRouter.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message || 'Backup request failed' }));
 
   // Is this container part of the scheduled host backup? (helper config; null when the helper is not installed)
   async function coverage(name) {

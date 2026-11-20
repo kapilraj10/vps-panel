@@ -126,7 +126,10 @@ after(async () => {
 
 // ---------- databases ----------
 test('databases: roles, validation, options', async () => {
-  assert.equal((await user.get('/api/databases')).status, 403);
+  const mine = await user.get('/api/databases');
+  assert.equal(mine.status, 200);
+  assert.deepEqual(mine.data.databases, [], 'users only see their own databases');
+  assert.equal((await user.post('/api/databases', { name: 'shop', engine: 'postgres' })).status, 400, 'users need a plan');
   assert.equal((await ops.get('/api/databases')).status, 200);
   assert.equal((await ops.post('/api/databases', { name: 'shop', engine: 'postgres' })).status, 403, 'plain admins read only');
   const o = await sup.get('/api/databases/options');

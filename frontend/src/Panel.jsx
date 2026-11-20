@@ -26,6 +26,7 @@ import { Uptime, Compare } from './pages/FleetViews.jsx';
 import Databases from './pages/Databases.jsx';
 import ContainerTools from './pages/ContainerTools.jsx';
 import SecurityCenter from './pages/SecurityCenter.jsx';
+import Billing, { Wallet } from './pages/Billing.jsx';
 
 const ConsolePage = lazy(() => import('./pages/Console.jsx'));
 
@@ -56,6 +57,7 @@ const ADMIN_NAV = [
   ]],
   ['Cloud', [
     ['users', 'Users', 'users'],
+    ['billing', 'Billing & plans', 'chart'],
     ['apps', 'Container apps', 'app'],
     ['container-tools', 'Container tools', 'cpu'],
     ['domains', 'Domains', 'globe'],
@@ -79,7 +81,8 @@ const USER_NAV = [
     ['apps', 'Applications', 'app'],
     ['pm2', 'PM2 Manager', 'cpu'],
     ['docker', 'Docker Manager', 'storage'],
-    ['databases', 'Databases', 'disk'],
+    ['databases', 'Databases in my servers', 'disk'],
+    ['cloud-databases', 'Managed databases', 'disk'],
     ['terminal', 'Terminal', 'terminal'],
     ['storage', 'Storage', 'storage'],
     ['backups', 'Backups', 'backup'],
@@ -87,6 +90,7 @@ const USER_NAV = [
     ['monitoring', 'Monitoring', 'chart'],
   ]],
   ['Account', [
+    ['wallet', 'Wallet & billing', 'chart'],
     ['ssh-keys', 'SSH keys', 'key'],
     ['account', 'Account settings', 'user'],
     ['security', 'Security', 'shield'],
@@ -217,6 +221,9 @@ function Shell() {
     case 'docker': body = me.isAdmin ? <DockerPage /> : <ContainerTools kind="docker" name={route[1]} />; break;
     case 'databases': body = me.isAdmin ? <Databases /> : <ContainerTools kind="databases" name={route[1]} />; break;
     case 'container-tools': body = <ContainerTools admin kind={route[1] || 'pm2'} base={`container-tools/${route[1] || 'pm2'}`} name={route[2]} />; break;
+    case 'billing': body = <Billing tab={route[1] || 'wallets'} />; break;
+    case 'wallet': body = <Wallet />; break;
+    case 'cloud-databases': body = <Databases />; break;
     case 'security-center': body = <SecurityCenter tab={route[1] || 'check'} />; break;
     case 'monitoring': body = <Monitoring />; break;
     case 'settings': body = <Settings />; break;

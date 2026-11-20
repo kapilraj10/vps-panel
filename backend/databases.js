@@ -10,11 +10,12 @@ import crypto from 'node:crypto';
 import net from 'node:net';
 import { db, audit } from './db.js';
 import { seal, open as unseal } from './secrets.js';
-import { requireAdmin, requireSuperAdmin, clientIp } from './auth.js';
+import { isAdmin, isSuperAdmin, clientIp } from './auth.js';
+import { plans } from './billing.js';
 import { dockerRequest, safeCreateBody, pullImage, demux } from './docker.js';
 import { locks } from './hostexec.js';
 import { listNetworks } from './lxd.js';
-import { wrap, bad, notFound, conflict, int, str } from './http.js';
+import { wrap, bad, forbidden, notFound, conflict, int, str } from './http.js';
 
 const NAME_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/;
 const IDENT_RE = /^[a-z_][a-z0-9_]{0,30}$/;
@@ -71,15 +72,28 @@ const password = () => crypto.randomBytes(18).toString('base64url');
 const view = (r, live) => ({
   id: r.id, name: r.name, engine: r.engine, engineLabel: ENGINES[r.engine]?.label, version: r.version, image: r.image,
   container: r.container, volume: r.volume, port: r.port, bindIp: r.bind_ip, dbName: r.db_name, user: r.db_user,
-  memoryMb: r.memory_mb, status: r.status, error: r.error, notes: r.notes, createdBy: r.created_by, createdAt: r.created_at,
+  memoryMb: r.memory_mb, status: r.status, error: r.error, notes: r.notes, createdBy: r.created_by, createdAt: r.created_at, ownerId: r.owner_id ?? null,
   state: live?.State || null, dockerStatus: live?.Status || null,
 });
 
-export function createDatabases() {
+// Super admins manage every database; plain admins read them; users see and manage only their own (owner_id).
+export function createDatabases({ billing = null } = {}) {
   const router = express.Router();
   const log = (req, action, target, detail = null, result = 'success') => audit.log({ username: req.session.username, ip: clientIp(req), action, target, result, detail });
   const rows = () => db.prepare('SELECT * FROM databases ORDER BY name').all();
   const getRow = (id) => { const r = db.prepare('SELECT * FROM databases WHERE id = ?').get(Number(id)); if (!r) throw notFound('No such database'); return r; };
+  // Row the session may READ (admins: all; users: own, others look missing)
+  const readable = (req, id) => {
+    const r = getRow(id);
+    if (!isAdmin(req.session) && r.owner_id !== req.session.id) throw notFound('No such database');
+    return r;
+  };
+  // Row the session may CHANGE (super admin, or its owner)
+  const writable = (req, id) => {
+    const r = readable(req, id);
+    if (isAdmin(req.session) && !isSuperAdmin(req.session)) throw forbidden('Only a super admin can do this');
+    return r;
+  };
   const setStatus = (id, status, error = null) => db.prepare('UPDATE databases SET status = ?, error = ?, updated_at = ? WHERE id = ?').run(status, error, Date.now(), id);
 
   async function liveContainers() {
@@ -130,27 +144,44 @@ export function createDatabases() {
     });
   }
 
-  router.use(requireAdmin);
-
   router.get('/options', wrap(async (_req, res) => {
     const bridge = await bridgeAddress();
     res.json({
       engines: Object.fromEntries(Object.entries(ENGINES).map(([k, e]) => [k, { label: e.label, port: e.port, versions: Object.keys(e.versions).sort((a, b) => Number(b) - Number(a)) }])),
       access: [{ id: 'local', label: 'This server only (127.0.0.1)' }, ...(bridge ? [{ id: 'containers', label: `This server and LXD containers (${bridge.ip})` }] : [])],
+      plans: plans.list({ kind: 'database', activeOnly: true }).map((p) => ({ id: p.id, name: p.name, memoryMb: p.memory_mb, priceDay: p.price_day, description: p.description })),
       ports: portRange(),
     });
   }));
 
-  router.get('/', wrap(async (_req, res) => {
+  router.get('/', wrap(async (req, res) => {
     res.set('Cache-Control', 'no-store');
     let live = {};
     let dockerError = null;
     try { live = await liveContainers(); } catch (e) { dockerError = e.message; }
-    res.json({ databases: rows().map((r) => view(r, live[r.name])), dockerError });
+    const list = isAdmin(req.session) ? rows() : rows().filter((r) => r.owner_id === req.session.id);
+    res.json({ databases: list.map((r) => view(r, live[r.name])), dockerError: isAdmin(req.session) ? dockerError : (dockerError ? 'Databases are not available right now' : null) });
   }));
 
-  router.post('/', requireSuperAdmin, wrap(async (req, res) => {
-    const b = req.body || {};
+  // Super admin: any size. Users: an active database plan (sets memory + daily price), reachable from their LXD servers.
+  router.post('/', wrap(async (req, res) => {
+    const b = { ...(req.body || {}) };
+    const self = !isAdmin(req.session);
+    if (!self && !isSuperAdmin(req.session)) throw forbidden('Only a super admin can do this');
+    let plan = null;
+    if (b.planId !== undefined && b.planId !== null && b.planId !== '') {
+      plan = plans.get(int(b.planId, { min: 1, max: 1e9, name: 'Plan' }));
+      if (!plan || plan.kind !== 'database' || (self && !plan.active)) throw bad('Pick an available database plan');
+      b.memoryMb = plan.memory_mb;
+    }
+    if (self) {
+      if (!plan) throw bad('Pick a plan');
+      b.access = 'containers';
+      b.ownerId = req.session.id;
+    }
+    const owner = b.ownerId ? db.prepare("SELECT id, role FROM users WHERE id = ? AND role = 'user'").get(int(b.ownerId, { min: 1, max: 1e9, name: 'Owner' })) : null;
+    if (b.ownerId && !owner) throw bad('Owner must be a user account');
+    const priceDay = plan ? plan.price_day : null;
     const name = str(b.name, { max: 32, name: 'Name', re: NAME_RE });
     const e = ENGINES[b.engine];
     if (!e) throw bad('Engine must be postgres, mysql or mongo');
@@ -172,14 +203,16 @@ export function createDatabases() {
     const existing = await dockerRequest('GET', `/containers/${container}/json`).catch((err) => (err.status === 404 ? null : Promise.reject(err)));
     if (existing) throw conflict(`A Docker container named ${container} already exists`);
 
+    if (self && priceDay != null) billing?.assertCanAfford(owner.id, priceDay);
     const secrets = { password: password(), rootPassword: b.engine === 'mysql' ? password() : undefined };
     const port = await freePort();
     const now = Date.now();
     const id = db.prepare(`INSERT INTO databases (name, engine, version, image, container, volume, port, bind_ip, db_name, db_user, password_enc,
-      root_password_enc, memory_mb, status, notes, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`)
+      root_password_enc, memory_mb, status, notes, created_by, created_at, updated_at, owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`)
       .run(name, b.engine, version, image, container, `kdb-${name}-data`, port, bindIp, dbName, user, seal(secrets.password),
         secrets.rootPassword ? seal(secrets.rootPassword) : null, memoryMb, b.notes ? str(b.notes, { max: 300, name: 'Notes', re: /^[^<>]*$/ }) : null,
-        req.session.username, now, now).lastInsertRowid;
+        req.session.username, now, now, owner?.id ?? null).lastInsertRowid;
+    if (owner && priceDay != null) billing?.start({ userId: owner.id, kind: 'database', name, planId: plan.id, priceDay, by: req.session.username });
     log(req, 'database_create', name, `${image} ${bindIp}:${port}`);
     const row = getRow(id);
     build(row, secrets).catch(() => {});
@@ -187,8 +220,8 @@ export function createDatabases() {
   }));
 
   // Connection details incl. password: super admin only, and every look is audited
-  router.get('/:id/credentials', requireSuperAdmin, (req, res) => {
-    const r = getRow(req.params.id);
+  router.get('/:id/credentials', (req, res) => {
+    const r = writable(req, req.params.id);
     const d = { user: r.db_user, password: unseal(r.password_enc), host: r.bind_ip, port: r.port, dbName: r.db_name };
     log(req, 'database_credentials_view', r.name);
     res.set('Cache-Control', 'no-store');
@@ -200,8 +233,9 @@ export function createDatabases() {
   });
 
   for (const action of ['start', 'stop', 'restart']) {
-    router.post(`/:id/${action}`, requireSuperAdmin, wrap(async (req, res) => {
-      const r = getRow(req.params.id);
+    router.post(`/:id/${action}`, wrap(async (req, res) => {
+      const r = writable(req, req.params.id);
+      if (action !== 'stop') billing?.assertCanRun(req.session);
       if (!['ready', 'error'].includes(r.status)) throw conflict(`${r.name} is still being created`);
       await locks.with(`db:${r.name}`, `${action} ${r.name}`, () => dockerRequest('POST', `/containers/${r.container}/${action}`, { query: action === 'start' ? undefined : { t: 30 }, timeout: 90_000 })
         .catch((err) => { if (err.status !== 304) throw err; }));
@@ -211,15 +245,15 @@ export function createDatabases() {
   }
 
   router.get('/:id/logs', wrap(async (req, res) => {
-    const r = getRow(req.params.id);
+    const r = readable(req, req.params.id);
     const buf = await dockerRequest('GET', `/containers/${r.container}/logs`, { query: { stdout: true, stderr: true, tail: 300, timestamps: true }, raw: true });
     res.set('Cache-Control', 'no-store');
     res.json({ logs: demux(buf) });
   }));
 
   // Delete: typed name; the data volume is kept unless deleteData is set (then it is gone for good)
-  router.delete('/:id', requireSuperAdmin, wrap(async (req, res) => {
-    const r = getRow(req.params.id);
+  router.delete('/:id', wrap(async (req, res) => {
+    const r = writable(req, req.params.id);
     if (req.body?.confirm !== r.name) throw bad(`Type "${r.name}" exactly to confirm`);
     if (['queued', 'pulling', 'creating'].includes(r.status)) throw conflict(`${r.name} is still being created. Wait until it is ready or failed.`);
     const deleteData = req.body?.deleteData === true;
@@ -228,9 +262,17 @@ export function createDatabases() {
       if (deleteData) await dockerRequest('DELETE', `/volumes/${r.volume}`).catch((err) => { if (err.status !== 404) throw err; });
       db.prepare('DELETE FROM databases WHERE id = ?').run(r.id);
     });
+    billing?.end('database', r.name, req.session.username);
     log(req, 'database_delete', r.name, deleteData ? `container and volume ${r.volume} deleted` : `container deleted, volume ${r.volume} kept`);
     res.json({ ok: true, keptVolume: deleteData ? null : r.volume });
   }));
 
-  return { router };
+  // Used by billing when a user's wallet runs out
+  async function stopByName(name) {
+    const r = db.prepare('SELECT * FROM databases WHERE name = ?').get(name);
+    if (!r) return;
+    await dockerRequest('POST', `/containers/${r.container}/stop`, { query: { t: 30 }, timeout: 90_000 }).catch((err) => { if (err.status !== 304 && err.status !== 404) throw err; });
+  }
+
+  return { router, stopByName };
 }

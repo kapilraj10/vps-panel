@@ -220,3 +220,18 @@ test('commands other than dry run require root', { skip: process.getuid() === 0 
   assert.equal(r.status, 1);
   assert.match(r.stderr, /must run as root/);
 });
+
+test('databases inside LXD servers are found and named after the server', () => {
+  const raw = [
+    JSON.stringify({ ID: 'a'.repeat(64), Image: 'postgres:17-alpine', Names: 'kc-db-shop' }),
+    JSON.stringify({ ID: 'b'.repeat(64), Image: 'nginx:alpine', Names: 'web' }),
+    'not json',
+    JSON.stringify({ ID: 'c'.repeat(64), Image: 'mongo:8', Names: 'bad name;rm' }),
+    '',
+  ].join('\n');
+  const dbs = h.parseDockerPs(raw);
+  assert.deepEqual(dbs.map((d) => [d.name, d.kind]), [['kc-db-shop', 'postgres'], ['cccccccccccc', 'mongo']]);
+  assert.equal(h.dumpFileName({ ...dbs[0], lxd: 'web1' }), 'web1--kc-db-shop-postgres.sql.gz');
+  assert.equal(h.dumpFileName(dbs[0]), 'kc-db-shop-postgres.sql.gz');
+  assert.ok(h.DB_FILE_RE.test(h.dumpFileName({ ...dbs[1], lxd: 'web1' })));
+});

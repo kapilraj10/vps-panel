@@ -38,6 +38,8 @@ import { createDatabases } from './databases.js';
 import { createSecurity } from './security.js';
 import { createTwoFactor, enforceTwoFactor, loginTickets, twoFactorOn, mustSetup } from './twofactor.js';
 import { createMaster } from './master.js';
+import { createBilling } from './billing.js';
+import { changeState } from './lxd.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -222,7 +224,12 @@ const backups = createBackups({
 const network = createNetwork({ io });
 const terminal = createTerminal({ containers });
 const stacks = createStacks({ containers, backupCoverage: (name) => backups.coverage(name) });
-const servers = createServers({ io, containers, allocator, stacks });
+// Billing stops a user's servers/databases when the wallet stays empty past the grace period (never deletes)
+const billing = createBilling({
+  stopServer: async (name) => { if (containers.snapshot(name)?.status === 'Running') await changeState(name, 'stop', () => {}, { force: true }); },
+  stopDatabase: (name) => databasesMod.stopByName(name),
+});
+const servers = createServers({ io, containers, allocator, stacks, billing });
 const appsMod = createApps({ io, containers });
 const containerTools = createContainerTools({ containers });
 const domains = createDomains({ containers, monitoring });
@@ -232,7 +239,7 @@ const nodes = createNodes({ io, monitoring });
 const sshConsole = createSshConsole();
 const netTests = createNetTests({ io, nodes, monitoring });
 const fleetOps = createFleetOps({ nodes });
-const databasesMod = createDatabases();
+const databasesMod = createDatabases({ billing });
 const securityMod = createSecurity();
 const master = createMaster({ sshConsole, nodes });
 // Disconnects a user's live sockets (all of them, or all but one session)
@@ -486,6 +493,7 @@ app.use('/api', fleetOps.router);
 app.use('/api', twoFactor.router);
 app.use('/api', master.router);
 app.use('/api/databases', databasesMod.router);
+app.use('/api', billing.router);
 app.use('/api/security', securityMod.router);
 app.get('/api/terminals', requireAdmin, (_req, res) => res.json({ terminals: terminal.list() }));
 
@@ -559,6 +567,7 @@ if (!STAGING) {
   replicas.start();
   nodes.start();
   netTests.start();
+  billing.startLoop();
 }
 if (!STAGING && process.env.BACKUP_DISK_CHECK !== 'off') {
   const diskLoop = () => checkBackupDisk().finally(() => setTimeout(diskLoop, BACKUP_DISK_CHECK_MS).unref());

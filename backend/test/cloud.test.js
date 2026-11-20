@@ -185,10 +185,12 @@ test('a user sees only their own servers', async () => {
 
 test('users cannot reach admin APIs', async () => {
   for (const [m, u] of [['GET', '/api/users'], ['GET', '/api/allocation'], ['GET', '/api/audit'], ['GET', '/api/backups'], ['GET', '/api/net/state'],
-    ['GET', '/api/snapshot'], ['POST', '/api/containers'], ['PUT', '/api/settings'], ['GET', '/api/networks'], ['GET', '/api/services']]) {
+    ['GET', '/api/snapshot'], ['PUT', '/api/settings'], ['GET', '/api/networks'], ['GET', '/api/services']]) {
     const r = await animesh.req(m, u, m === 'GET' ? undefined : {});
     assert.equal(r.status, 403, `${m} ${u} should be 403, got ${r.status}`);
   }
+  // Users may create servers only from a plan (self-service billing)
+  assert.equal((await animesh.post('/api/containers', { name: 'x1', image: 'ubuntu-24.04', cpu: 1, memoryMiB: 256, diskGiB: 5 })).status, 400);
 });
 
 test('users cannot freeze, resize, rebuild or delete even their own server', async () => {

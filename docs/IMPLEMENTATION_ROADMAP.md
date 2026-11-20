@@ -98,3 +98,25 @@ Recommended next order: (a) run `audit-server.sh` + `install-lb.sh --check` on t
 | Fail2ban + panel login blocks | ✅ tested (fake helper) |
 | 2FA (TOTP + recovery codes + require for admins) | ✅ tested |
 | Security check page | ✅ tested (fake helper) |
+
+---
+
+## Cloud-for-users brief (2026-11-20): status
+
+Kapil: users without their own LXD server get an ID/password from the admin and deploy on Kapil's servers; the admin sets
+daily prices (AWS style); DB backups after creating a DB in the panel; a new PC joins as a server; if the main server
+goes off, the next one serves the apps and websites. Decisions: prepaid wallet, users self-serve servers + databases +
+apps, warm standby with automatic failover.
+
+| Item | Status |
+|---|---|
+| DB backups: databases made from a server's Databases page (Docker inside LXD) were never dumped | ✅ fixed: helper dumps them via `lxc exec … docker exec`; a failure there is a warning, not a failed backup; users download their dumps in My backups. **Needs `sudo system/install-backups.sh` on the server** |
+| Plans (server / database) with a daily price, AWS-style per-resource rates as price hints | ✅ tested (`backend/billing.js`, migration 7) |
+| Prepaid wallets: top-up / refund / correction by super admin, ledger, hourly charging (exact per day) | ✅ tested |
+| Empty wallet → grace period → services stopped (never deleted), start refused, top-up resumes | ✅ tested |
+| Users create LXD servers from a plan (quota + balance checked), delete their own | ✅ tested |
+| Users create managed databases (master Docker) from a plan, private to them | ✅ tested |
+| Users deploy apps/websites in their servers | ✅ existed already (Applications, Domains) |
+| Billing UI: admin Billing & plans; user Wallet, New server, Managed databases | ✅ builds; not click-tested on the server |
+| New PC joins as a server (LXD on the node, deploy targets) | ⬜ next phase |
+| Warm standby + automatic failover to the next server | ⬜ phase after that |
