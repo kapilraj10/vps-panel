@@ -1,0 +1,79 @@
+# CD: after CI passes on kapil-cloud, deploy to the staging panel (cloude.sampannatech.online).
+# Production (panel.kapilrajkc.com.np) only by hand: Actions -> Deploy -> Run workflow -> production.
+# Both go through system/deploy.sh, which uses upgrade-panel.sh (automatic rollback if the new version fails).
+#
+# Repository secrets (Settings -> Secrets and variables -> Actions):
+#   DEPLOY_SSH_KEY        private key whose .pub is in kapil's ~/.ssh/authorized_keys on the server
+#   DEPLOY_KNOWN_HOSTS    output of: ssh-keyscan -t ed25519 ... (see docs/CICD.md)
+#   CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET   only if ssh.gyannportal.com is ever put behind a Cloudflare Access policy
+name: Deploy
+on:
+  push:
+    branches: [kapil-cloud]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which panel
+        type: choice
+        options: [staging, production]
+        default: staging
+
+concurrency:
+  group: deploy-${{ github.event.inputs.target || 'staging' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: ${{ github.event.inputs.target || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Secrets present?
+        id: ready
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then echo "::warning::DEPLOY_SSH_KEY is not set, skipping the deploy (see docs/CICD.md)"; echo "ok=no" >> "$GITHUB_OUTPUT"; else echo "ok=yes" >> "$GITHUB_OUTPUT"; fi
+      - name: Install cloudflared
+        if: steps.ready.outputs.ok == 'yes'
+        run: |
+          curl -fsSL -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+      - name: SSH key
+        if: steps.ready.outputs.ok == 'yes'
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+      - name: Deploy
+        if: steps.ready.outputs.ok == 'yes'
+        env:
+          CF_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          TOKEN=""
+          if [ -n "$CF_ID" ]; then TOKEN="--service-token-id $CF_ID --service-token-secret $CF_SECRET"; fi
+          cat > ~/.ssh/config <<CONF
+          Host ssh.gyannportal.com
+            User kapil
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ProxyCommand cloudflared access ssh --hostname %h $TOKEN
+          CONF
+          chmod 600 ~/.ssh/config
+          bash system/deploy.sh "${{ github.event.inputs.target || 'staging' }}"
