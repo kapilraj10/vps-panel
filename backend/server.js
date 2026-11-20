@@ -231,6 +231,7 @@ const stacks = createStacks({ containers, backupCoverage: (name) => backups.cove
 const billing = createBilling({
   stopServer: async (name) => { if (containers.snapshot(name)?.status === 'Running') await changeState(name, 'stop', () => {}, { force: true }); },
   stopDatabase: (name) => databasesMod.stopByName(name),
+  notify: (kind, target, level, message) => monitoring.raise(kind, target, level, message),
 });
 const servers = createServers({ io, containers, allocator, stacks, billing });
 const appHost = createAppHost({ containers, allocator });

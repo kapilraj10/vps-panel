@@ -35,7 +35,15 @@ export const plans = {
     AND (@a = 0 OR active = 1) ORDER BY kind, sort, price_day, name`).all({ kind, a: activeOnly ? 1 : 0 }),
 };
 
-export function createBilling({ stopServer = async () => {}, stopDatabase = async () => {} } = {}) {
+// Months are Nepal calendar months in Nepal time (UTC+05:45), e.g. "2026-11" = 1 Nov 00:00 to 1 Dec 00:00 NPT
+const NPT = (5 * 60 + 45) * 60_000;
+export const periodOf = (t) => new Date(t + NPT).toISOString().slice(0, 7);
+export function periodRange(period) {
+  const [y, m] = period.split('-').map(Number);
+  return { start: Date.UTC(y, m - 1, 1) - NPT, end: Date.UTC(y, m, 1) - NPT };
+}
+
+export function createBilling({ stopServer = async () => {}, stopDatabase = async () => {}, notify = () => {} } = {}) {
   const router = express.Router();
   const who = (req) => ({ username: req.session.username, ip: clientIp(req) });
   const cfg = () => ({
@@ -153,6 +161,7 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
       if (!u.billing_state) {
         db.prepare("UPDATE users SET billing_state = 'grace', billing_grace_since = ? WHERE id = ?").run(now, u.id);
         audit.log({ action: 'billing_grace', target: u.username, result: 'warning', detail: `balance ${u.balance}, services stop in ${c.graceHours} h unless topped up` });
+        notify('billing', `user:${u.username}`, 'warning', `${u.username}'s wallet is empty; services stop in ${c.graceHours} h unless topped up`);
       } else if (u.billing_state === 'grace' && now - u.billing_grace_since >= c.graceHours * HOUR) {
         await suspendServices(u, now);
       }
@@ -172,13 +181,65 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
     }
     db.prepare("UPDATE users SET billing_state = 'stopped' WHERE id = ?").run(u.id);
     db.prepare('UPDATE billed_resources SET paused = 1 WHERE user_id = ? AND ended_at IS NULL').run(u.id);
+    notify('billing', `user:${u.username}`, 'critical', `${u.username}'s services were stopped: wallet empty past the grace period`);
     audit.log({ action: 'billing_suspend', target: u.username, result: failed.length ? 'failure' : 'success',
       detail: `stopped ${list.map((r) => r.name).join(', ') || 'nothing'}${failed.length ? `; failed: ${failed.join('; ')}` : ''}` });
   }
 
+  // ---------- invoices: one statement per user per finished month (UNIQUE(user_id, period) makes it idempotent) ----------
+  function statement(userId, period) {
+    const { start, end } = periodRange(period);
+    const sum = (q, ...a) => db.prepare(q).get(userId, ...a).s || 0;
+    const opening = sum('SELECT COALESCE(SUM(amount), 0) AS s FROM wallet_tx WHERE user_id = ? AND created_at < ?', start);
+    const by = (kind) => sum('SELECT COALESCE(SUM(amount), 0) AS s FROM wallet_tx WHERE user_id = ? AND kind = ? AND created_at >= ? AND created_at < ?', kind, start, end);
+    const topups = by('topup') + by('refund');
+    const charges = -by('charge');
+    const adjustments = by('adjust');
+    const lines = db.prepare(`SELECT r.kind, r.name, p.name AS plan, -SUM(t.amount) AS amount, COUNT(*) AS hours FROM wallet_tx t
+      JOIN billed_resources r ON r.id = t.resource_id LEFT JOIN plans p ON p.id = r.plan_id
+      WHERE t.user_id = ? AND t.kind = 'charge' AND t.created_at >= ? AND t.created_at < ? GROUP BY r.id ORDER BY r.kind, r.name`).all(userId, start, end);
+    return { period, start, end, opening, topups, charges, adjustments, closing: opening + topups - charges + adjustments, lines };
+  }
+  function writeInvoices(now = Date.now()) {
+    const prev = periodOf(periodRange(periodOf(now)).start - 1);
+    let made = 0;
+    for (const u of db.prepare("SELECT id FROM users WHERE role = 'user'").all()) {
+      if (db.prepare('SELECT 1 FROM invoices WHERE user_id = ? AND period = ?').get(u.id, prev)) continue;
+      const st = statement(u.id, prev);
+      if (!st.opening && !st.topups && !st.charges && !st.adjustments) continue; // nothing happened: no invoice
+      const number = `SC-${prev.replace('-', '')}-${String(u.id).padStart(5, '0')}`;
+      const r = db.prepare(`INSERT OR IGNORE INTO invoices (user_id, period, number, opening, topups, charges, adjustments, closing, lines, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(u.id, prev, number, st.opening, st.topups, st.charges, st.adjustments, st.closing, JSON.stringify(st.lines), now);
+      made += r.changes;
+    }
+    return made;
+  }
+  const invoiceView = (i) => ({ id: i.id, number: i.number, period: i.period, opening: i.opening, topups: i.topups, charges: i.charges, adjustments: i.adjustments,
+    closing: i.closing, lines: JSON.parse(i.lines || '[]'), createdAt: i.created_at, username: i.username });
+
+  router.get('/billing/invoices', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const uid = isAdmin(req.session) && req.query.user ? Number(req.query.user) : req.session.id;
+    const list = db.prepare('SELECT i.*, u.username FROM invoices i JOIN users u ON u.id = i.user_id WHERE i.user_id = ? ORDER BY period DESC').all(uid).map(invoiceView);
+    // The month so far, not yet an invoice
+    const current = isAdmin(req.session) && !req.query.user ? null : statement(uid, periodOf(Date.now()));
+    res.json({ invoices: list, current, currency: cfg().currency });
+  });
+  router.get('/billing/invoices/:id', (req, res) => {
+    const i = db.prepare('SELECT i.*, u.username, u.full_name, u.email FROM invoices i JOIN users u ON u.id = i.user_id WHERE i.id = ?').get(Number(req.params.id));
+    if (!i || (!isAdmin(req.session) && i.user_id !== req.session.id)) throw notFound('No such invoice');
+    res.set('Cache-Control', 'no-store');
+    res.json({ invoice: { ...invoiceView(i), fullName: i.full_name, email: i.email }, currency: cfg().currency });
+  });
+  router.post('/billing/invoices/run', requireSuperAdmin, (req, res) => {
+    const made = writeInvoices();
+    audit.log({ ...who(req), action: 'invoices_run', result: 'success', detail: `${made} new` });
+    res.json({ created: made });
+  });
+
   let timer = null;
   function startLoop(everyMs = Number(process.env.BILLING_TICK_MS) || 5 * 60_000) {
-    const loop = () => tick().catch((e) => console.error('Billing tick failed:', e.message)).finally(() => { timer = setTimeout(loop, everyMs); timer.unref(); });
+    const loop = () => tick().then(() => writeInvoices()).catch((e) => console.error('Billing tick failed:', e.message)).finally(() => { timer = setTimeout(loop, everyMs); timer.unref(); });
     timer = setTimeout(loop, Math.min(everyMs, 10_000));
     timer.unref();
   }
@@ -388,7 +449,7 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
   // Welcome credit for self-registered users
   const credit = (userId, amount) => addTx(userId, amount, 'topup', { note: 'Welcome credit', by: 'system' });
 
-  return { router, credit, start, end, endPrefix, rename, settle, tick, startLoop, assertCanAfford, assertCanRun, walletOf, priceFromRates, cfg };
+  return { router, credit, statement, writeInvoices, start, end, endPrefix, rename, settle, tick, startLoop, assertCanAfford, assertCanRun, walletOf, priceFromRates, cfg };
 }
 
 export const money = (paisa, cur = 'NPR') => `${cur} ${(paisa / 100).toFixed(2)}`;

@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import { db, audit, users } from './db.js';
 import { execStream } from './lxd.js';
 import { seal, open } from './secrets.js';
-import { clientIp, isAdmin, ownsContainer } from './auth.js';
+import { clientIp, isAdmin, ownsContainer, requireSuperAdmin } from './auth.js';
 import { roomFor } from './containers.js';
 import { wrap, bad, forbidden, notFound, conflict, int, str } from './http.js';
 import { plans } from './billing.js';
@@ -239,7 +239,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     try { envKeys = Object.keys(JSON.parse(open(a.env_enc) || '{}')); } catch { envKeys = []; }
     return {
       id: a.id, name: a.name, container: a.container, type: a.type, typeLabel: APP_TYPES[a.type]?.label || a.type,
-      owner: a.owner || users.byId(a.user_id)?.username, repoUrl: a.repo_url, branch: a.branch, rootDir: a.root_dir || '',
+      owner: a.owner || users.byId(a.user_id)?.username, userId: a.user_id, repoUrl: a.repo_url, branch: a.branch, rootDir: a.root_dir || '',
       outputDir: a.output_dir || '', installCmd: a.install_cmd || '', buildCmd: a.build_cmd || '', startCmd: a.start_cmd || '',
       port: a.port, envKeys, hasGitToken: !!a.git_token_enc, status: a.status, lastDeployAt: a.last_deploy_at,
       deploying: busy.has(a.id), createdAt: a.created_at, target: a.target || 'server', planId: a.plan_id ?? null,
@@ -680,6 +680,63 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
         restarts: p.pm2_env?.restart_time ?? 0, uptime: p.pm2_env?.pm_uptime ?? null,
       })),
     });
+  }));
+
+  // Super admin: move an app to another target of the SAME owner (main server <-> their VPS <-> their cloud server).
+  // The old copy is stopped and its process entry removed (files kept there), then the app is deployed at the new place.
+  router.post('/apps/:id/move', requireSuperAdmin, wrap(async (req, res) => {
+    const a = mineApp(req);
+    if (busy.has(a.id)) throw conflict('Wait for the running task to finish');
+    const b = req.body ?? {};
+    const owner = users.byId(a.user_id);
+    let next;
+    if (b.target === 'main') {
+      if (owner.role !== 'user') throw bad('Only customer apps can move to the main server');
+      const host = appHost.hostNameFor(owner.username);
+      const pkg = appHost.packageOf(owner.id) || (b.planId ? plans.get(int(b.planId, { min: 1, max: 1e9, name: 'Package' })) : null);
+      if (!pkg || pkg.kind !== 'app') throw bad(`${owner.username} has no hosting package: pick one (planId)`);
+      const count = db.prepare("SELECT COUNT(*) AS n FROM apps WHERE container = ? AND target = 'main'").get(host).n;
+      if (pkg.max_apps != null && count >= pkg.max_apps) throw conflict(`${owner.username}'s ${pkg.name} package is full (${pkg.max_apps} apps)`);
+      next = { target: 'main', container: host, server_id: null, plan: pkg };
+    } else if (b.target === 'vps') {
+      const srv = customerServers.get(int(b.serverId, { min: 1, max: 1e9, name: 'VPS' }));
+      if (!srv || srv.user_id !== a.user_id) throw bad('Pick a VPS of the same customer');
+      next = { target: 'vps', container: `vps-${srv.id}`, server_id: srv.id };
+    } else if (b.target === 'server') {
+      const container = str(b.container, { max: 63, name: 'Server' });
+      if (!containers.exists(container) || appHost?.isAppHost(container) || !users.ownersOf(container).some((u) => u.id === a.user_id)) throw bad("Pick one of the customer's cloud servers");
+      next = { target: 'server', container, server_id: null };
+    } else throw bad('Target must be main, vps or server');
+    if (next.container === a.container) throw bad('The app is already there');
+    if (db.prepare('SELECT 1 FROM apps WHERE container = ? AND name = ?').get(next.container, a.name)) throw conflict(`An app named ${a.name} already exists there`);
+    const used = new Set(db.prepare('SELECT port FROM apps WHERE container = ?').all(next.container).map((r) => r.port));
+    let port = a.port;
+    while (used.has(port)) port += 1;
+
+    // 1. take it down where it is (best effort; files stay)
+    const off = await execApp(a, PM2_SCRIPT, { OP: 'delete', APP_NAME: a.name, REMOVE_FILES: '0' }, { timeoutMs: 60_000 }).catch((err) => ({ code: -1, output: err.message }));
+    for (const d of db.prepare("SELECT * FROM domains WHERE app_id = ? AND requested_by = 'auto'").all(a.id)) {
+      if (d.route_synced && cfConfigured()) await removeRoute(d.hostname.toLowerCase(), d.dns_record_id).catch(() => {});
+      db.prepare('DELETE FROM domains WHERE id = ?').run(d.id);
+    }
+    // 2. point the row at the new place
+    db.prepare('UPDATE apps SET target = ?, container = ?, server_id = ?, port = ?, status = ?, updated_at = ? WHERE id = ?')
+      .run(next.target, next.container, next.server_id, port, next.target === 'main' ? 'provisioning' : 'new', Date.now(), a.id);
+    if (next.target === 'main' && !appHost.packageOf(owner.id)) {
+      db.prepare('UPDATE users SET hosting_plan_id = ? WHERE id = ?').run(next.plan.id, owner.id);
+      billing?.start({ userId: owner.id, kind: 'app', name: next.container, planId: next.plan.id, priceDay: next.plan.price_day, by: req.session.username });
+    }
+    if (a.target === 'main' && !db.prepare("SELECT 1 FROM apps WHERE container = ? AND target = 'main'").get(a.container)) {
+      billing?.end('app', a.container, req.session.username);
+      db.prepare('UPDATE users SET hosting_plan_id = NULL WHERE id = ?').run(owner.id);
+      appHost?.release(a.container).catch((err) => console.error(`App host ${a.container}: ${err.message}`));
+    }
+    audit.log({ ...who(req), action: 'app_move', target: `${a.container}/${a.name}`, result: 'success', detail: `-> ${next.target} ${next.container}, port ${port}${off.code === 0 ? '' : '; old copy not reached'}` });
+    // 3. bring it up there
+    const moved = appsDb.get(a.id);
+    if (next.target === 'main') provision(who(req), owner, a.id);
+    else if (next.target === 'vps' || containers.snapshot(next.container)?.status === 'Running') startDeploy(req, moved);
+    res.json({ app: publicApp(appsDb.get(a.id)), oldCopyStopped: off.code === 0 });
   }));
 
   router.delete('/apps/:id', wrap(async (req, res) => {

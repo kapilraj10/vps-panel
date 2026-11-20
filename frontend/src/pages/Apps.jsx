@@ -78,6 +78,34 @@ function AppStats({ id }) {
   );
 }
 
+// Super admin: move an app to another place of the same customer
+function MoveDialog({ a, onClose, onDone }) {
+  const run = useAction();
+  const vps = useApi('/api/my-servers');
+  const plans = useApi('/api/billing/plans?kind=app');
+  const [f, setF] = useState({ target: 'main', serverId: '', container: '', planId: '' });
+  const theirs = (vps.data?.servers || []).filter((s) => s.userId === a.userId);
+  async function submit(e) {
+    e.preventDefault();
+    const body = { target: f.target, ...(f.target === 'vps' ? { serverId: Number(f.serverId || theirs[0]?.id) } : {}), ...(f.target === 'server' ? { container: f.container } : {}), ...(f.planId ? { planId: Number(f.planId) } : {}) };
+    if (await run(() => api(`/api/apps/${a.id}/move`, { method: 'POST', body }), (r) => `Moved. ${r.oldCopyStopped ? 'Old copy stopped.' : 'The old place could not be reached.'}`)) { onDone(); onClose(); }
+  }
+  return (
+    <Dialog open title={`Move ${a.name}`} onClose={onClose}>
+      <form className="form" onSubmit={submit}>
+        <p className="muted">Now on {where(a)}. The old copy is stopped (its files stay there); the app is deployed at the new place. Its automatic subdomain is made again after the first deploy.</p>
+        <Field label="Move to"><select value={f.target} onChange={(e) => setF({ ...f, target: e.target.value })}>
+          <option value="main">Main server (owner's hosting package)</option><option value="vps">Owner's VPS</option><option value="server">Owner's cloud server</option></select></Field>
+        {f.target === 'main' && <Field label="Package if the owner has none"><select value={f.planId} onChange={(e) => setF({ ...f, planId: e.target.value })}><option value="">Use the owner's package</option>
+          {(plans.data?.plans || []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>}
+        {f.target === 'vps' && <Field label="VPS"><select required value={f.serverId || theirs[0]?.id || ''} onChange={(e) => setF({ ...f, serverId: e.target.value })}>{theirs.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.host})</option>)}</select></Field>}
+        {f.target === 'server' && <Field label="Cloud server name"><input required value={f.container} onChange={(e) => setF({ ...f, container: e.target.value })} /></Field>}
+        <div className="dialog__buttons"><button type="button" className="btn" onClick={onClose}>Cancel</button><button type="submit" className="btn btn--primary">Move</button></div>
+      </form>
+    </Dialog>
+  );
+}
+
 function AppForm({ open, onClose, app, onSaved }) {
   const { me, cts } = useLive();
   const run = useAction();
@@ -158,7 +186,7 @@ function AppForm({ open, onClose, app, onSaved }) {
 }
 
 function AppDetail({ id }) {
-  const { socket, cts } = useLive();
+  const { socket, cts, me } = useLive();
   const run = useAction();
   const confirm = useConfirm();
   const { data, error, reload } = useApi(`/api/apps/${id}`);
@@ -167,6 +195,7 @@ function AppDetail({ id }) {
   const [viewDep, setViewDep] = useState(null);
   const [logs, setLogs] = useState(null);
   const [editing, setEditing] = useState(false);
+  const [moving, setMoving] = useState(false);
   const logRef = useRef(null);
 
   useEffect(() => {
@@ -200,6 +229,7 @@ function AppDetail({ id }) {
             <button type="button" className="btn" disabled={a.deploying || !serverUp} onClick={() => op('start')}><Icon name="play" size={14} /> Start</button>
             <button type="button" className="btn" disabled={a.deploying || !serverUp} onClick={() => op('stop')}><Icon name="stop" size={14} /> Stop</button>
             <button type="button" className="btn" onClick={() => setEditing(true)}>Edit</button>
+            {me.role === 'super_admin' && <button type="button" className="btn" onClick={() => setMoving(true)}>Move</button>}
             <button type="button" className="btn btn--danger" onClick={del} aria-label="Delete app"><Icon name="trash" size={14} /></button>
           </div>
         )} />
@@ -248,6 +278,7 @@ function AppDetail({ id }) {
         <div className="dialog__buttons"><button type="button" className="btn" onClick={() => setViewDep(null)}>Close</button></div>
       </Dialog>
       <AppForm open={editing} app={a} onClose={() => setEditing(false)} onSaved={reload} />
+      {moving && <MoveDialog a={a} onClose={() => setMoving(false)} onDone={reload} />}
     </>
   );
 }

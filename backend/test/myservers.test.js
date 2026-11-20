@@ -219,6 +219,30 @@ test('database on my VPS: docker run there, port on 127.0.0.1 of that server, no
   assert.match(fs.readFileSync(CALLS, 'utf8'), /docker rm -f kdb-anadb/);
 });
 
+test('admin moves an app from the customer VPS to the main server and back', async () => {
+  const r = await ana.post('/api/apps', { target: 'vps', serverId, name: 'blog', type: 'express', repoUrl: 'https://example.test/shop.git', installCmd: '' });
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  const id = r.data.app.id;
+  assert.equal((await ana.post(`/api/apps/${id}/move`, { target: 'main' })).status, 403, 'super admin only');
+  assert.equal((await sup.post(`/api/apps/${id}/move`, { target: 'main' })).status, 400, 'no package yet');
+  const pkg = (await sup.post('/api/billing/plans', { kind: 'app', name: 'Move Pkg', cpu: 1, memoryMb: 512, diskGb: 5, priceDay: 100, maxApps: 3 })).data.plan;
+  const m = await sup.post(`/api/apps/${id}/move`, { target: 'main', planId: pkg.id });
+  assert.equal(m.status, 200, JSON.stringify(m.data));
+  assert.equal(m.data.app.target, 'main');
+  assert.equal(m.data.app.container, 'apps-ana');
+  await until(async () => (await ana.get(`/api/apps/${id}`)).data.app.status === 'running', 30000);
+  assert.ok((await ana.get('/api/billing/me')).data.wallet.resources.some((x) => x.kind === 'app' && x.name === 'apps-ana'), 'package billing started');
+  assert.match(fs.readFileSync(CALLS, 'utf8'), /pm2 delete blog/, 'old copy stopped on the VPS');
+
+  const back = await sup.post(`/api/apps/${id}/move`, { target: 'vps', serverId });
+  assert.equal(back.status, 200, JSON.stringify(back.data));
+  await until(async () => { const d = (await ana.get(`/api/apps/${id}`)).data; return d.app.target === 'vps' && !d.app.deploying && d.app.status === 'running'; });
+  assert.ok(!(await ana.get('/api/billing/me')).data.wallet.resources.some((x) => x.kind === 'app'), 'last main app gone: package ended');
+  assert.equal((await ana.del(`/api/apps/${id}`, { confirm: 'blog' })).status, 200);
+  const audit = (await sup.get('/api/audit?action=app_move')).data.entries;
+  assert.equal(audit.length, 2);
+});
+
 test('a changed host key is refused until the server is connected again', async () => {
   await new Promise((r) => ssh.close(r));
   ssh = await startSsh(ssh2.utils.generateKeyPairSync('ed25519').private);

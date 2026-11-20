@@ -122,11 +122,20 @@ function Shell() {
   const [alerts, setAlerts] = useState([]);
   const [cmdk, setCmdk] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
+  const [wallet, setWallet] = useState(null);
   const route = useRoute();
 
   useEffect(() => {
     api('/api/me').then((m) => { setCsrf(m.csrf); setMe(m); }).catch(() => {});
   }, []);
+  // Customers: wallet state for the low-balance / grace / stopped banner (refreshed every 5 minutes)
+  useEffect(() => {
+    if (!me || me.isAdmin) return undefined;
+    const load = () => api('/api/billing/me').then((d) => setWallet(d.wallet || null)).catch(() => {});
+    load();
+    const t = setInterval(load, 5 * 60_000);
+    return () => clearInterval(t);
+  }, [me]);
 
   useEffect(() => {
     if (!me) return undefined;
@@ -291,6 +300,9 @@ function Shell() {
             </div>
           </header>
           {status === 'offline' && <div className="offline">Lost connection to the panel. Reconnecting automatically…</div>}
+          {wallet?.state === 'stopped' && <div className="billbar billbar--bad">Your services are stopped because your wallet is empty. Nothing was deleted; they can start again after a top-up.<a href={href('wallet')}>Wallet</a></div>}
+          {wallet?.state === 'grace' && <div className="billbar billbar--bad">Your wallet is empty. Services stop on {new Date(wallet.graceEndsAt).toLocaleString()} unless it is topped up.<a href={href('wallet')}>Wallet</a></div>}
+          {wallet?.state === 'ok' && wallet.low && <div className="billbar billbar--warn">Low balance: about {wallet.daysLeft} day(s) left at your current usage.<a href={href('wallet')}>Wallet</a></div>}
           <main className="content">{body}</main>
         </div>
       </div>

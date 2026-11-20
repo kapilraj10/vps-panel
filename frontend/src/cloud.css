@@ -428,3 +428,18 @@ tr.click { cursor: pointer; }
 .plan-card.is-off { opacity: 0.5; cursor: not-allowed; }
 .login__home { display: inline-flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; }
 .hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+/* invoices */
+.invoice__head { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.invoice__sum { display: grid; grid-template-columns: 1fr auto; gap: 4px 24px; max-width: 360px; margin: 14px 0 0 auto; }
+.invoice__sum dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+@media print {
+  body * { visibility: hidden; }
+  .dialog[open], .dialog[open] * { visibility: visible; }
+  .dialog[open] { position: absolute; inset: 0; box-shadow: none; border: 0; max-width: none; }
+  .dialog__buttons { display: none; }
+}
+/* customer billing banner */
+.billbar { padding: 10px 16px; font-weight: 500; }
+.billbar--warn { background: color-mix(in srgb, var(--warn) 18%, var(--surface)); }
+.billbar--bad { background: color-mix(in srgb, var(--alarm) 18%, var(--surface)); }
+.billbar a { margin-left: 8px; }

@@ -43,6 +43,82 @@ function ResourceTable({ list, cur, onEnd }) {
   );
 }
 
+// ---------- invoices ----------
+function InvoiceView({ id, onClose }) {
+  const { data, error } = useApi(`/api/billing/invoices/${id}`);
+  const i = data?.invoice;
+  const cur = data?.currency;
+  return (
+    <Dialog open wide title={i ? `Invoice ${i.number}` : 'Invoice'} onClose={onClose}>
+      <ErrorNote error={error} />
+      {!i ? <SkeletonRows /> : (
+        <div className="invoice">
+          <div className="invoice__head"><div><strong>Sampanna Cloud</strong><br /><span className="muted">Kathmandu, Nepal</span></div>
+            <div className="num"><strong>{i.number}</strong><br />Period {i.period}<br /><span className="muted">{i.fullName || i.username}{i.email ? ` · ${i.email}` : ''}</span></div></div>
+          <table className="table"><thead><tr><th>Service</th><th>Plan</th><th className="num">Hours billed</th><th className="num">Amount</th></tr></thead>
+            <tbody>{i.lines.map((l) => <tr key={`${l.kind}-${l.name}`}><td>{l.kind} {l.name}</td><td className="muted">{l.plan || 'custom'}</td><td className="num">{l.hours}</td><td className="num">{fmtMoney(l.amount, cur)}</td></tr>)}
+              {!i.lines.length && <tr><td colSpan={4} className="muted">No usage this month</td></tr>}</tbody></table>
+          <dl className="invoice__sum">
+            <dt>Opening balance</dt><dd>{fmtMoney(i.opening, cur)}</dd>
+            <dt>Top-ups and credits</dt><dd>+{fmtMoney(i.topups, cur)}</dd>
+            <dt>Charges</dt><dd>−{fmtMoney(i.charges, cur)}</dd>
+            {i.adjustments !== 0 && <><dt>Corrections</dt><dd>{fmtMoney(i.adjustments, cur)}</dd></>}
+            <dt><strong>Closing balance</strong></dt><dd><strong>{fmtMoney(i.closing, cur)}</strong></dd>
+          </dl>
+          <p className="muted small">Prepaid statement: charges were taken from the wallet hourly. Prices in {cur}.</p>
+        </div>
+      )}
+      <div className="dialog__buttons"><button type="button" className="btn" onClick={() => window.print()}>Print / save as PDF</button><button type="button" className="btn btn--primary" onClick={onClose}>Close</button></div>
+    </Dialog>
+  );
+}
+
+function Invoices({ user }) {
+  const { data, error } = useApi(`/api/billing/invoices${user ? `?user=${user}` : ''}`);
+  const [open, setOpen] = useState(null);
+  const cur = data?.currency;
+  return (
+    <Card title="Invoices" sub="A statement is made for every month with activity (Nepal time)" pad={false}>
+      <ErrorNote error={error} />
+      {!data ? <div className="pad"><SkeletonRows rows={2} /></div> : (
+        <div className="table-wrap"><table className="table">
+          <thead><tr><th>Month</th><th>Number</th><th className="num">Charges</th><th className="num">Top-ups</th><th className="num">Closing balance</th><th /></tr></thead>
+          <tbody>
+            {data.current && <tr><td>{data.current.period} <Badge tone="warn">so far</Badge></td><td className="muted">–</td><td className="num">{fmtMoney(data.current.charges, cur)}</td><td className="num">{fmtMoney(data.current.topups, cur)}</td><td className="num">{fmtMoney(data.current.closing, cur)}</td><td /></tr>}
+            {data.invoices.map((i) => <tr key={i.id}><td>{i.period}</td><td className="mono small">{i.number}</td><td className="num">{fmtMoney(i.charges, cur)}</td><td className="num">{fmtMoney(i.topups, cur)}</td><td className="num">{fmtMoney(i.closing, cur)}</td>
+              <td><button type="button" className="btn btn--small" onClick={() => setOpen(i.id)}>View</button></td></tr>)}
+          </tbody>
+        </table></div>
+      )}
+      {open && <InvoiceView id={open} onClose={() => setOpen(null)} />}
+    </Card>
+  );
+}
+
+function HostingPackage() {
+  const run = useAction();
+  const { data, reload } = useApi('/api/hosting');
+  const [pick, setPick] = useState('');
+  if (!data) return null;
+  const pkg = data.package;
+  return (
+    <Card title="Hosting package (main server)" sub={pkg ? 'Covers all your apps on the main server' : 'Starts with your first app on the main server (Applications → New application → Main server)'}>
+      {pkg ? (
+        <>
+          <p><strong>{pkg.name}</strong> · {pkg.cpu} CPU · {pkg.memoryMb >= 1024 ? `${pkg.memoryMb / 1024} GB` : `${pkg.memoryMb} MB`} RAM · {pkg.diskGb} GB · {data.appsUsed} of {pkg.maxApps ?? '∞'} apps · {fmtMoney(pkg.priceDay)}/day</p>
+          <div className="inline-form">
+            <select value={pick} onChange={(e) => setPick(e.target.value)}>
+              <option value="">Change package…</option>
+              {data.packages.filter((p) => p.id !== pkg.id).map((p) => <option key={p.id} value={p.id}>{p.name}: {p.maxApps ?? '∞'} apps, {p.cpu} CPU, {p.memoryMb} MB, {p.diskGb} GB · {fmtMoney(p.priceDay)}/day</option>)}
+            </select>
+            <button type="button" className="btn btn--primary" disabled={!pick} onClick={async () => { if (await run(() => api('/api/hosting', { method: 'PUT', body: { planId: Number(pick) } }), 'Package changed')) { setPick(''); reload(); } }}>Change</button>
+          </div>
+        </>
+      ) : <p className="muted">No package yet.</p>}
+    </Card>
+  );
+}
+
 // ---------- user ----------
 export function Wallet() {
   const { data, error, reload } = useApi('/api/billing/me', { interval: 60_000 });
@@ -66,6 +142,8 @@ export function Wallet() {
       <Card title="Prices" sub="Create a server from My servers → New server, or a database from Managed databases." pad={false}>
         {!plans.data ? <div className="pad"><SkeletonRows /></div> : <PlanTable plans={plans.data.plans} cur={cur} />}
       </Card>
+      <HostingPackage />
+      <Invoices />
       <Card title="Transactions" pad={false}>{!data ? <div className="pad"><SkeletonRows /></div> : <TxTable list={data.transactions} cur={cur} />}</Card>
     </>
   );
@@ -184,6 +262,7 @@ function UserWallet({ id, cur, onClose }) {
           <p className="muted small">Use this for servers you assigned before billing existed, or to give one user a special price.</p>
           <h3>Transactions</h3>
           <TxTable list={data.transactions} cur={cur} />
+          <Invoices user={id} />
         </>
       )}
       <div className="dialog__buttons"><button type="button" className="btn btn--primary" onClick={onClose}>Close</button></div>
