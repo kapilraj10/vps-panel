@@ -32,7 +32,7 @@ const alertsDb = {
 function notify(a) {
   const url = settings.get('notify_webhook_url');
   if (!url || !/^https:\/\//.test(url)) return;
-  const text = `[Kapil Cloud] ${a.level.toUpperCase()}: ${a.message}`;
+  const text = `[Sampanna Cloud] ${a.level.toUpperCase()}: ${a.message}`;
   fetch(url, {
     method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(8000),
     body: JSON.stringify({ text, content: text, alert: { kind: a.kind, target: a.target, level: a.level, message: a.message, at: a.created_at } }),

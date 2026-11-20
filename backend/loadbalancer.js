@@ -18,7 +18,7 @@ const STATUS_PORT = () => Number(process.env.LB_STATUS_PORT) || 18089;
 const BUCKET_MS = 10_000;
 const KEEP_BUCKETS = 360; // 1 hour
 
-export const HEADER = '# Managed by Kapil Cloud. Do not edit: changes are overwritten. Edit the app in the panel instead.';
+export const HEADER = '# Managed by Sampanna Cloud. Do not edit: changes are overwritten. Edit the app in the panel instead.';
 
 export function renderCommon() {
   return `${HEADER}

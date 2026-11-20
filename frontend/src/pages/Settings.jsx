@@ -29,6 +29,7 @@ export default function Settings() {
       terminal_idle_minutes: Number(f.terminal_idle_minutes), terminal_max_minutes: Number(f.terminal_max_minutes),
       allowed_domain_suffixes: f.allowed_domain_suffixes.split(',').map((s) => s.trim()).filter(Boolean),
       auto_app_domains: f.auto_app_domains !== false, auto_app_domain_suffix: f.auto_app_domain_suffix || '',
+      signup_enabled: f.signup_enabled !== false, signup_requires_approval: !!f.signup_requires_approval, signup_credit: Number(f.signup_credit) || 0,
     };
     if (await run(() => api('/api/settings', { method: 'PUT', body }), 'Settings saved')) alloc.reload();
   }
@@ -37,7 +38,7 @@ export default function Settings() {
       <PageHeader title="Settings" sub={sup ? 'Platform-wide limits and thresholds' : 'Only a super admin can change these'} />
       <form className="form" onSubmit={save}>
         <fieldset disabled={!sup} className="bk-fieldset">
-          <Card title="Resource allocation" sub="Kapil Cloud refuses new servers or bigger limits that go past these. Overcommit lets containers share capacity; it is safe for CPU, risky for memory.">
+          <Card title="Resource allocation" sub="Sampanna Cloud refuses new servers or bigger limits that go past these. Overcommit lets containers share capacity; it is safe for CPU, risky for memory.">
             <div className="fgrid">
               <Field label="CPU overcommit ratio" hint="1 = never promise more vCPUs than cores. 2 = up to twice as many."><input type="number" min={1} max={8} step={0.25} value={f.cpu_overcommit} onChange={set('cpu_overcommit')} /></Field>
               <Field label="Memory overcommit ratio" hint="Keep at 1 unless you know the workloads. Over 1 can trigger out-of-memory kills."><input type="number" min={1} max={2} step={0.05} value={f.memory_overcommit} onChange={set('memory_overcommit')} /></Field>
@@ -65,6 +66,10 @@ export default function Settings() {
                 <input value={f.auto_app_domain_suffix || ''} onChange={set('auto_app_domain_suffix')} placeholder={f.allowed_domain_suffixes.split(',')[0]?.trim()} />
               </Field>
               <label className="check"><input type="checkbox" checked={f.auto_app_domains !== false} onChange={(e) => setF({ ...f, auto_app_domains: e.target.checked })} /> Give every new app a subdomain automatically</label>
+              <h3>Public sign-up</h3>
+              <label className="check"><input type="checkbox" checked={f.signup_enabled !== false} onChange={(e) => setF({ ...f, signup_enabled: e.target.checked })} /> Anyone can create an account on the landing page (/register)</label>
+              <label className="check"><input type="checkbox" checked={!!f.signup_requires_approval} onChange={(e) => setF({ ...f, signup_requires_approval: e.target.checked })} /> New accounts wait until an admin activates them (Users page)</label>
+              <Field label="Welcome credit for new accounts (NPR)" hint="0 = none. Lets people try an app before paying."><input type="number" min={0} step="1" value={(f.signup_credit || 0) / 100} onChange={(e) => setF({ ...f, signup_credit: Math.round(Number(e.target.value) * 100) })} /></Field>
             </div>
           </Card>
           {sup && <div><button type="submit" className="btn btn--primary">Save settings</button></div>}

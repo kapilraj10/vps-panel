@@ -1,4 +1,4 @@
-/* Kapil Cloud design system: shell, cards, KPIs, badges, tables, dialogs, command palette, toasts.
+/* Sampanna Cloud design system: shell, cards, KPIs, badges, tables, dialogs, command palette, toasts.
    Tokens live in index.css (:root and [data-theme='dark']). */
 
 .icon { flex: none; display: inline-block; vertical-align: -0.2em; }
@@ -426,3 +426,5 @@ tr.click { cursor: pointer; }
 .plan-card__price { font-size: 1.25rem; font-weight: 700; }
 .plan-card__price small { font-size: 0.8rem; font-weight: 450; color: var(--muted); }
 .plan-card.is-off { opacity: 0.5; cursor: not-allowed; }
+.login__home { display: inline-flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; }
+.hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }

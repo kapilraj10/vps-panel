@@ -1,6 +1,6 @@
 // Cloudflare Tunnel + DNS for user domains. Optional: without CF_API_TOKEN/CF_ACCOUNT_ID/CF_TUNNEL_ID the panel
 // shows the route an admin must add by hand instead.
-// Safety: the tunnel config is read, only hostnames Kapil Cloud manages are added/removed, everything else
+// Safety: the tunnel config is read, only hostnames Sampanna Cloud manages are added/removed, everything else
 // (panel.gyannportal.com, ssh, existing sites) is written back unchanged. A hostname that already has a rule or a
 // DNS record we did not create is refused.
 const API = 'https://api.cloudflare.com/client/v4';
@@ -52,7 +52,7 @@ export async function addRoute(hostname, service, { managed }) {
   const cfg = await getConfig();
   const ingress = [...(cfg.ingress || [])];
   const idx = ingress.findIndex((r) => r.hostname?.toLowerCase() === hostname);
-  if (idx >= 0 && !managed) throw new Error(`The tunnel already has a route for ${hostname} that Kapil Cloud did not create. Not touching it.`);
+  if (idx >= 0 && !managed) throw new Error(`The tunnel already has a route for ${hostname} that Sampanna Cloud did not create. Not touching it.`);
   const rule = { hostname, service };
   if (idx >= 0) ingress[idx] = { ...ingress[idx], ...rule };
   else {
@@ -70,7 +70,7 @@ export async function addRoute(hostname, service, { managed }) {
   if (ours) return ours.id;
   if (existing.length) throw new Error(`${hostname} already has a DNS record (${existing[0].type} ${existing[0].content}). Remove it in Cloudflare first.`);
   const rec = await cf('POST', `/zones/${zone.id}/dns_records`, {
-    type: 'CNAME', name: hostname, content: tunnelTarget(), proxied: true, comment: 'Kapil Cloud',
+    type: 'CNAME', name: hostname, content: tunnelTarget(), proxied: true, comment: 'Sampanna Cloud',
   });
   return rec.id;
 }

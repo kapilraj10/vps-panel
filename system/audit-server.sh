@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kapil Cloud — READ-ONLY server audit (Phase 1).
+# Sampanna Cloud — READ-ONLY server audit (Phase 1).
 #
 # Collects facts about kapil-server into one report file. It changes NOTHING: no installs, no restarts,
 # no config writes, no container/firewall/network changes. It never prints passwords, private keys,

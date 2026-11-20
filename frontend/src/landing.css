@@ -1,0 +1,71 @@
+/* Sampanna Cloud landing page. Uses the panel's colour tokens, so light/dark follow the same theme. */
+body:has(.lp) { background: var(--paper); }
+.lp { min-height: 100vh; color: var(--ink); overflow-x: hidden;
+  background: radial-gradient(1100px 520px at 85% -10%, color-mix(in srgb, var(--s1) 16%, transparent), transparent),
+    radial-gradient(800px 400px at -10% 10%, color-mix(in srgb, var(--s3) 10%, transparent), transparent), var(--paper); }
+.lp a { text-decoration: none; }
+.lp h1, .lp h2, .lp h3 { letter-spacing: -0.02em; }
+
+.lp-nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; max-width: 1120px; margin: 0 auto; padding: 18px 16px; }
+.lp-logo { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.1rem; color: var(--ink); }
+.lp-nav nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.lp-nav nav > a:not(.btn) { color: var(--ink-2); padding: 6px 10px; border-radius: 8px; }
+.lp-nav nav > a:not(.btn):hover { background: var(--surface-2); color: var(--ink); }
+
+.lp-hero { display: grid; grid-template-columns: 1.1fr 1fr; gap: 40px; align-items: center; max-width: 1120px; margin: 0 auto; padding: 56px 16px 40px; }
+.lp-hero h1 { font-size: clamp(2rem, 4.6vw, 3.3rem); line-height: 1.08; margin: 14px 0 16px; }
+.lp-pill { display: inline-block; padding: 5px 12px; border-radius: 999px; font-size: 0.85rem; font-weight: 600;
+  color: var(--s1); background: color-mix(in srgb, var(--s1) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--s1) 25%, transparent); }
+.lp-lead { color: var(--ink-2); font-size: 1.08rem; line-height: 1.6; max-width: 60ch; }
+.lp-cta { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 24px; }
+.btn--big { padding: 12px 20px; font-size: 1rem; font-weight: 600; }
+.lp-note { color: var(--good); font-weight: 600; margin-top: 12px; }
+
+.lp-term { background: #0f1115; color: #d7dae0; border-radius: 14px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25); overflow: hidden; border: 1px solid #262a33; min-width: 0; }
+.lp-term__bar { display: flex; align-items: center; gap: 6px; padding: 10px 14px; background: #171a21; font-size: 0.8rem; color: #8b919d; }
+.lp-term__bar i { width: 10px; height: 10px; border-radius: 50%; background: #3a3f4b; }
+.lp-term__bar i:nth-child(1) { background: #ff5f57; } .lp-term__bar i:nth-child(2) { background: #febc2e; } .lp-term__bar i:nth-child(3) { background: #28c840; }
+.lp-term__bar span { margin-left: 8px; }
+.lp-term pre { margin: 0; padding: 18px; font-size: 0.86rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+
+.lp-section { max-width: 1120px; margin: 0 auto; padding: 56px 16px; }
+.lp-section > h2, .lp-final h2 { font-size: clamp(1.6rem, 3vw, 2.2rem); margin: 0 0 8px; }
+.lp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; margin-top: 24px; }
+.lp-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow); }
+.lp-card h3 { margin: 0 0 6px; font-size: 1.05rem; }
+.lp-card p { margin: 0; color: var(--ink-2); line-height: 1.55; }
+
+.lp-steps { list-style: none; padding: 0; margin: 24px 0 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+.lp-steps li { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 20px; }
+.lp-steps span { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--s1); color: #fff; font-weight: 700; }
+.lp-steps h3 { margin: 12px 0 4px; } .lp-steps p { margin: 0; color: var(--ink-2); }
+
+.lp-tabs { display: inline-flex; gap: 4px; padding: 4px; margin: 18px 0 6px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line); }
+.lp-tabs button { border: 0; background: transparent; padding: 8px 16px; border-radius: 8px; font: inherit; color: var(--ink-2); cursor: pointer; }
+.lp-tabs button[aria-selected='true'] { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: var(--shadow); }
+.lp-plans { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; margin-top: 18px; }
+.lp-plan { display: flex; flex-direction: column; gap: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 22px; }
+.lp-plan.is-pop { border-color: var(--s1); box-shadow: 0 0 0 2px color-mix(in srgb, var(--s1) 25%, transparent), var(--shadow); }
+.lp-plan h3 { margin: 0; }
+.lp-price { font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; }
+.lp-price small { font-size: 0.95rem; font-weight: 500; color: var(--muted); }
+.lp-month { color: var(--muted); font-size: 0.9rem; }
+.lp-plan ul { padding-left: 18px; margin: 8px 0; color: var(--ink-2); line-height: 1.7; flex: 1; }
+.lp-desc { color: var(--muted); font-size: 0.9rem; margin: 0 0 8px; }
+.lp-plan .btn { justify-content: center; }
+
+.lp-faq { display: grid; gap: 10px; margin-top: 20px; max-width: 800px; }
+.lp-faq details { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; }
+.lp-faq summary { cursor: pointer; font-weight: 600; }
+.lp-faq p { color: var(--ink-2); margin: 10px 0 0; line-height: 1.55; }
+
+.lp-final { text-align: center; max-width: 760px; margin: 20px auto 40px; padding: 48px 16px; border-radius: 18px;
+  background: color-mix(in srgb, var(--s1) 9%, var(--surface)); border: 1px solid color-mix(in srgb, var(--s1) 20%, var(--line)); }
+.lp-final .lp-lead { margin: 0 auto 20px; }
+.lp-foot { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; max-width: 1120px; margin: 0 auto; padding: 24px 16px 40px; color: var(--muted); border-top: 1px solid var(--line); }
+.lp-foot a { color: var(--ink-2); }
+
+@media (max-width: 860px) {
+  .lp-hero { grid-template-columns: 1fr; padding-top: 28px; }
+  .lp-nav nav > a:not(.btn) { display: none; }
+}

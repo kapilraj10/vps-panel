@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kapil Cloud agent installer. Served by the panel at /agent/v1/install.sh (the panel fills in the agent's SHA-256).
+# Sampanna Cloud agent installer. Served by the panel at /agent/v1/install.sh (the panel fills in the agent's SHA-256).
 #
 #   curl -fsSL https://<panel>/agent/v1/install.sh | sudo bash -s -- --master https://<panel> --token <one-time token> [options]
 #
@@ -35,7 +35,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
   rm -f /etc/systemd/system/kapil-agent.service && systemctl daemon-reload
   rm -rf /opt/kapil-agent /etc/kapil-agent
   id kapil-agent >/dev/null 2>&1 && userdel kapil-agent || true
-  echo "Kapil Cloud agent removed. Remove the server from the panel too (or revoke its agent key there)."
+  echo "Sampanna Cloud agent removed. Remove the server from the panel too (or revoke its agent key there)."
   exit 0
 fi
 
@@ -79,7 +79,7 @@ HOME_DIR="$(getent passwd "$RUN_USER" | cut -d: -f6)"
 if [ "$OWN_USER" -eq 1 ]; then HARDEN="ProtectHome=true"; else HARDEN="ProtectHome=false"; fi
 cat > /etc/systemd/system/kapil-agent.service <<EOF
 [Unit]
-Description=Kapil Cloud node agent
+Description=Sampanna Cloud node agent
 After=network-online.target
 Wants=network-online.target
 

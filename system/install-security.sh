@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs (or updates) the Kapil Cloud security helper: firewall (UFW) + fail2ban control and the security check.
+# Installs (or updates) the Sampanna Cloud security helper: firewall (UFW) + fail2ban control and the security check.
 #   sudo bash system/install-security.sh            install/update the helper and its sudoers line
 #   sudo bash system/install-security.sh --tools    also apt install ufw and fail2ban (UFW stays OFF until you turn it on)
 # Safe to run again. It never enables the firewall by itself.

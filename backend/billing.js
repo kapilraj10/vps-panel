@@ -377,7 +377,10 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
     for (const r of db.prepare('SELECT kind, name FROM billed_resources WHERE kind = ? AND ended_at IS NULL').all(kind)) if (r.name.startsWith(prefix)) end(r.kind, r.name, by);
   };
 
-  return { router, start, end, endPrefix, rename, settle, tick, startLoop, assertCanAfford, assertCanRun, walletOf, priceFromRates, cfg };
+  // Welcome credit for self-registered users
+  const credit = (userId, amount) => addTx(userId, amount, 'topup', { note: 'Welcome credit', by: 'system' });
+
+  return { router, credit, start, end, endPrefix, rename, settle, tick, startLoop, assertCanAfford, assertCanRun, walletOf, priceFromRates, cfg };
 }
 
 export const money = (paisa, cur = 'NPR') => `${cur} ${(paisa / 100).toFixed(2)}`;

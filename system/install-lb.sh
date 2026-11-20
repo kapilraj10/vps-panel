@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepares Nginx for Kapil Cloud replicas / load balancing. Safe to run again.
+# Prepares Nginx for Sampanna Cloud replicas / load balancing. Safe to run again.
 #
 #   sudo bash system/install-lb.sh            # do it
 #   sudo bash system/install-lb.sh --check    # only report what would change
@@ -61,14 +61,14 @@ if [ ! -d "$CONF_DIR" ]; then install -d -o "$PANEL_USER" -g "$(id -gn "$PANEL_U
 chown "$PANEL_USER:$(id -gn "$PANEL_USER")" "$CONF_DIR"
 if [ ! -d "$LOG_DIR" ]; then install -d -o root -g adm -m 755 "$LOG_DIR"; CREATED+=("$LOG_DIR"); fi
 if [ ! -f "$INCLUDE" ]; then
-  printf '# Kapil Cloud load balancer sites (written by the panel)\ninclude %s/*.conf;\n' "$CONF_DIR" > "$INCLUDE"
+  printf '# Sampanna Cloud load balancer sites (written by the panel)\ninclude %s/*.conf;\n' "$CONF_DIR" > "$INCLUDE"
   chmod 644 "$INCLUDE"
   CREATED+=("$INCLUDE")
 fi
 
 say "sudo rule: $PANEL_USER may run '$NGINX -t' and '$SYSTEMCTL reload nginx' only"
 TMP="$(mktemp)"
-printf '# Kapil Cloud: validate + reload nginx after the panel changes a load balancer\n%s ALL=(root) NOPASSWD: %s -t, %s reload nginx\n' "$PANEL_USER" "$NGINX" "$SYSTEMCTL" > "$TMP"
+printf '# Sampanna Cloud: validate + reload nginx after the panel changes a load balancer\n%s ALL=(root) NOPASSWD: %s -t, %s reload nginx\n' "$PANEL_USER" "$NGINX" "$SYSTEMCTL" > "$TMP"
 visudo -cf "$TMP" >/dev/null || { rm -f "$TMP"; undo; die "sudoers rule did not validate"; }
 [ -f "$SUDOERS" ] || CREATED+=("$SUDOERS")
 install -o root -g root -m 440 "$TMP" "$SUDOERS"

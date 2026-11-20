@@ -40,6 +40,7 @@ import { createTwoFactor, enforceTwoFactor, loginTickets, twoFactorOn, mustSetup
 import { createMaster } from './master.js';
 import { createBilling } from './billing.js';
 import { createAppHost } from './apphost.js';
+import { createSignup } from './signup.js';
 import { changeState } from './lxd.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -406,10 +407,15 @@ app.post('/api/logout', (req, res) => {
 
 // Built React app: the login page and its assets are public, everything else needs a session
 const dist = path.join(__dirname, '..', 'frontend', 'dist');
+const signup = createSignup({ startSession, addCredit: (id, amount) => billing.credit(id, amount) });
+app.use(signup.router);
 const sendPage = (file) => (_req, res) => res.sendFile(path.join(dist, file), (err) => {
   if (err) res.status(404).send('Frontend is not built yet. Run: cd frontend && npm run build');
 });
 app.get('/login', (req, res, next) => (req.session ? res.redirect(302, '/') : sendPage('login.html')(req, res, next)));
+app.get('/register', (req, res, next) => (req.session ? res.redirect(302, '/') : sendPage('login.html')(req, res, next)));
+// Logged-out visitors get the public landing page; logged-in users the panel
+app.get(['/', '/home'], (req, res, next) => (req.session && req.path === '/' ? next() : sendPage('landing.html')(req, res, next)));
 app.use('/assets', express.static(path.join(dist, 'assets'), { immutable: true, maxAge: '1y', fallthrough: false }));
 
 app.use(requireAuth);
@@ -550,7 +556,7 @@ setInterval(async () => {
 
 await loadInfo();
 server.listen(PORT, HOST, () => {
-  console.log(`Kapil Cloud panel running on http://${HOST}:${PORT}`);
+  console.log(`Sampanna Cloud panel running on http://${HOST}:${PORT}`);
   if (!INGEST_TOKEN) console.log('INGEST_TOKEN is empty: request counting is off until you set it in .env');
   if (!users.list().length) console.log('No users yet. Create the first admin with: node scripts/create-user.js');
 });

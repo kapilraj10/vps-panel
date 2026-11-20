@@ -64,7 +64,7 @@ if [ -d "$APP_DIR/.git" ]; then
   git "$@" -C "$APP_DIR" fetch --depth 1 origin "$BRANCH"
   git -C "$APP_DIR" reset --hard FETCH_HEAD
 elif [ -e "$APP_DIR" ] && [ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
-  echo "$APP_DIR exists and is not a git checkout. Move it away first; Kapil Cloud will not overwrite it."; exit 22
+  echo "$APP_DIR exists and is not a git checkout. Move it away first; Sampanna Cloud will not overwrite it."; exit 22
 else
   echo "==> Cloning $REPO ($BRANCH)"
   git "$@" clone --depth 1 --branch "$BRANCH" "$REPO" "$APP_DIR"
@@ -230,7 +230,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
       onOutput: (text) => { log = (log + text).slice(-LOG_KEEP); emitLog(a, depId, text); },
     })
       .then(({ code }) => ({ ok: code === 0, code }))
-      .catch((err) => { const msg = `\n[Kapil Cloud] ${err.message}\n`; log += msg; emitLog(a, depId, msg); return { ok: false, code: -1 }; })
+      .catch((err) => { const msg = `\n[Sampanna Cloud] ${err.message}\n`; log += msg; emitLog(a, depId, msg); return { ok: false, code: -1 }; })
       .then(({ ok, code }) => {
         const commit = /@@COMMIT ([0-9a-f]{40})/.exec(log)?.[1] || null;
         db.prepare('UPDATE deployments SET status = ?, log = ?, commit_sha = ?, finished_at = ? WHERE id = ?')
@@ -421,7 +421,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
         });
       })
       .catch((err) => {
-        say(`[Kapil Cloud] Could not prepare the main server: ${err.message}`);
+        say(`[Sampanna Cloud] Could not prepare the main server: ${err.message}`);
         db.prepare("UPDATE deployments SET status = 'failed', log = ?, finished_at = ? WHERE id = ?").run(log, Date.now(), depId);
         busy.delete(a.id);
         appsDb.setStatus(appId, 'failed');

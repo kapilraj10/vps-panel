@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Kapil Cloud node agent. One file, no dependencies, Node.js 22+ (uses the built-in WebSocket and fetch).
+// Sampanna Cloud node agent. One file, no dependencies, Node.js 22+ (uses the built-in WebSocket and fetch).
 //
 //   node kapil-agent.js enroll --master https://panel.example.com --token <one-time token> [--config /etc/kapil-agent/agent.json]
 //   node kapil-agent.js run [--config /etc/kapil-agent/agent.json]

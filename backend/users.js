@@ -11,7 +11,7 @@ export const passwordProblem = (pw) => {
   if (Buffer.byteLength(pw) > 72) return 'Password must be at most 72 bytes';
   return null;
 };
-const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,20}$/;
+export const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,20}$/;
 
 export function createUsers({ io, containers, terminal }) {
   const router = express.Router();

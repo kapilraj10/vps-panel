@@ -286,8 +286,8 @@ if [ "$DB_EXTERNAL" = no ] && [ -d "$DB_DIR" ]; then cp -a "$DB_DIR" "$STAGING/b
 
 [ -n "$(env_get "$NEW_ENV" SESSION_SECRET)" ] || { env_set "$NEW_ENV" SESSION_SECRET "$(openssl rand -hex 32)"; echo "Added SESSION_SECRET to .env"; }
 if [ -z "$(env_get "$NEW_ENV" SECRETS_KEY)" ]; then
-  # A database that already ran Kapil Cloud may hold secrets sealed with the key derived from SESSION_SECRET.
-  # A new key would make those unreadable, so only add one before the first Kapil Cloud start.
+  # A database that already ran Sampanna Cloud may hold secrets sealed with the key derived from SESSION_SECRET.
+  # A new key would make those unreadable, so only add one before the first Sampanna Cloud start.
   DB_FILE="${DB_PATH:-$DB_DIR/panel.db}"
   ALREADY="$(cd "$STAGING/backend" && DB_FILE="$DB_FILE" node -e '
     const fs = require("fs");

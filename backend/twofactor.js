@@ -10,7 +10,7 @@ import { checkPassword, clientIp, requireSuperAdmin, isAdmin, loginLimit } from 
 import { wrap, bad, forbidden, notFound } from './http.js';
 import { toBase32, verifyTotp } from './totp.js';
 
-const ISSUER = 'Kapil Cloud';
+const ISSUER = 'Sampanna Cloud';
 
 const hash = (c) => crypto.createHash('sha256').update(c.replace(/[^a-z0-9]/gi, '').toLowerCase()).digest('hex');
 const newRecovery = () => Array.from({ length: 10 }, () => crypto.randomBytes(5).toString('hex').replace(/^(.{5})/, '$1-'));
