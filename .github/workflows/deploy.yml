@@ -1,5 +1,8 @@
-# CD: after CI passes on kapil-cloud, deploy to the staging panel (cloude.sampannatech.online).
-# Production (panel.kapilrajkc.com.np) only by hand: Actions -> Deploy -> Run workflow -> production.
+# CD: every push to main (e.g. a merged pull request) runs CI, then deploys.
+# Which panel: the repository variable DEPLOY_TARGET (Settings -> Secrets and variables -> Actions -> Variables):
+#   staging    = cloude.sampannatech.online (default when the variable is not set)
+#   production = panel.kapilrajkc.com.np
+# By hand: Actions -> Deploy -> Run workflow -> pick the panel.
 # Both go through system/deploy.sh, which uses upgrade-panel.sh (automatic rollback if the new version fails).
 #
 # Repository secrets (Settings -> Secrets and variables -> Actions):
@@ -9,7 +12,7 @@
 name: Deploy
 on:
   push:
-    branches: [kapil-cloud]
+    branches: [main]
   workflow_dispatch:
     inputs:
       target:
@@ -19,7 +22,7 @@ on:
         default: staging
 
 concurrency:
-  group: deploy-${{ github.event.inputs.target || 'staging' }}
+  group: deploy-${{ github.event.inputs.target || vars.DEPLOY_TARGET || 'staging' }}
   cancel-in-progress: false
 
 permissions:
@@ -33,7 +36,7 @@ jobs:
     needs: ci
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: ${{ github.event.inputs.target || 'staging' }}
+    environment: ${{ github.event.inputs.target || vars.DEPLOY_TARGET || 'staging' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -78,4 +81,4 @@ jobs:
             ProxyCommand cloudflared access ssh --hostname %h $TOKEN
           CONF
           chmod 600 ~/.ssh/config
-          bash system/deploy.sh "${{ github.event.inputs.target || 'staging' }}"
+          bash system/deploy.sh "${{ github.event.inputs.target || vars.DEPLOY_TARGET || 'staging' }}"

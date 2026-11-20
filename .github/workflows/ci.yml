@@ -3,7 +3,7 @@
 name: CI
 on:
   push:
-    branches-ignore: [kapil-cloud] # kapil-cloud runs CI inside the Deploy workflow
+    branches-ignore: [main] # main runs CI inside the Deploy workflow (tests first, then deploy)
   pull_request:
   workflow_call:
 
