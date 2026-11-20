@@ -21,7 +21,7 @@ const KINDS = ['server', 'database', 'app'];
 export const paymentRequired = (msg) => new HttpError(402, msg);
 
 const planView = (p) => p && ({
-  id: p.id, kind: p.kind, name: p.name, cpu: p.cpu, memoryMb: p.memory_mb, diskGb: p.disk_gb,
+  id: p.id, kind: p.kind, name: p.name, cpu: p.cpu, memoryMb: p.memory_mb, diskGb: p.disk_gb, maxApps: p.max_apps ?? null, maxDatabases: p.max_databases ?? null,
   priceDay: p.price_day, active: !!p.active, sort: p.sort, description: p.description || '',
 });
 const resView = (r) => ({
@@ -35,7 +35,15 @@ export const plans = {
     AND (@a = 0 OR active = 1) ORDER BY kind, sort, price_day, name`).all({ kind, a: activeOnly ? 1 : 0 }),
 };
 
-export function createBilling({ stopServer = async () => {}, stopDatabase = async () => {} } = {}) {
+// Months are Nepal calendar months in Nepal time (UTC+05:45), e.g. "2026-11" = 1 Nov 00:00 to 1 Dec 00:00 NPT
+const NPT = (5 * 60 + 45) * 60_000;
+export const periodOf = (t) => new Date(t + NPT).toISOString().slice(0, 7);
+export function periodRange(period) {
+  const [y, m] = period.split('-').map(Number);
+  return { start: Date.UTC(y, m - 1, 1) - NPT, end: Date.UTC(y, m, 1) - NPT };
+}
+
+export function createBilling({ stopServer = async () => {}, stopDatabase = async () => {}, notify = () => {} } = {}) {
   const router = express.Router();
   const who = (req) => ({ username: req.session.username, ip: clientIp(req) });
   const cfg = () => ({
@@ -65,17 +73,22 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
     const until = Math.min(now, r.ended_at || now);
     const elapsed = until - r.billed_until;
     if (elapsed <= 0) return 0;
-    if (r.paused) { db.prepare('UPDATE billed_resources SET billed_until = ? WHERE id = ?').run(until, r.id); return 0; }
+    if (r.paused) { db.prepare('UPDATE billed_resources SET billed_until = ? WHERE id = ? AND billed_until = ?').run(until, r.id, r.billed_until); return 0; }
     const exact = (r.price_day * elapsed) / DAY + (r.carry || 0);
-    const amount = Math.floor(exact);
+    const amount = Math.floor(exact + 1e-6); // tolerance: float carries must not lose a paisa over many settlements
+    let charged = 0;
     db.transaction(() => {
-      db.prepare('UPDATE billed_resources SET billed_until = ?, carry = ?, charged = charged + ? WHERE id = ?').run(until, exact - amount, amount, r.id);
-      if (amount > 0) {
+      // Idempotent: only the settlement that still sees the old billed_until moves it and charges. A second run for the
+      // same period (a retry, a duplicate job, a stale row object) changes nothing.
+      const moved = db.prepare('UPDATE billed_resources SET billed_until = ?, carry = ?, charged = charged + ? WHERE id = ? AND billed_until = ?')
+        .run(until, Math.max(0, exact - amount), amount, r.id, r.billed_until).changes;
+      if (moved && amount > 0) {
+        charged = amount;
         const hours = Math.round((elapsed / HOUR) * 100) / 100;
         addTx(r.user_id, -amount, 'charge', { resourceId: r.id, note: `${r.kind} ${r.name}: ${hours} h` });
       }
     })();
-    return amount;
+    return charged;
   }
 
   // Starts billing a resource for a user (idempotent per kind+name)
@@ -148,6 +161,7 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
       if (!u.billing_state) {
         db.prepare("UPDATE users SET billing_state = 'grace', billing_grace_since = ? WHERE id = ?").run(now, u.id);
         audit.log({ action: 'billing_grace', target: u.username, result: 'warning', detail: `balance ${u.balance}, services stop in ${c.graceHours} h unless topped up` });
+        notify('billing', `user:${u.username}`, 'warning', `${u.username}'s wallet is empty; services stop in ${c.graceHours} h unless topped up`);
       } else if (u.billing_state === 'grace' && now - u.billing_grace_since >= c.graceHours * HOUR) {
         await suspendServices(u, now);
       }
@@ -167,13 +181,65 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
     }
     db.prepare("UPDATE users SET billing_state = 'stopped' WHERE id = ?").run(u.id);
     db.prepare('UPDATE billed_resources SET paused = 1 WHERE user_id = ? AND ended_at IS NULL').run(u.id);
+    notify('billing', `user:${u.username}`, 'critical', `${u.username}'s services were stopped: wallet empty past the grace period`);
     audit.log({ action: 'billing_suspend', target: u.username, result: failed.length ? 'failure' : 'success',
       detail: `stopped ${list.map((r) => r.name).join(', ') || 'nothing'}${failed.length ? `; failed: ${failed.join('; ')}` : ''}` });
   }
 
+  // ---------- invoices: one statement per user per finished month (UNIQUE(user_id, period) makes it idempotent) ----------
+  function statement(userId, period) {
+    const { start, end } = periodRange(period);
+    const sum = (q, ...a) => db.prepare(q).get(userId, ...a).s || 0;
+    const opening = sum('SELECT COALESCE(SUM(amount), 0) AS s FROM wallet_tx WHERE user_id = ? AND created_at < ?', start);
+    const by = (kind) => sum('SELECT COALESCE(SUM(amount), 0) AS s FROM wallet_tx WHERE user_id = ? AND kind = ? AND created_at >= ? AND created_at < ?', kind, start, end);
+    const topups = by('topup') + by('refund');
+    const charges = -by('charge');
+    const adjustments = by('adjust');
+    const lines = db.prepare(`SELECT r.kind, r.name, p.name AS plan, -SUM(t.amount) AS amount, COUNT(*) AS hours FROM wallet_tx t
+      JOIN billed_resources r ON r.id = t.resource_id LEFT JOIN plans p ON p.id = r.plan_id
+      WHERE t.user_id = ? AND t.kind = 'charge' AND t.created_at >= ? AND t.created_at < ? GROUP BY r.id ORDER BY r.kind, r.name`).all(userId, start, end);
+    return { period, start, end, opening, topups, charges, adjustments, closing: opening + topups - charges + adjustments, lines };
+  }
+  function writeInvoices(now = Date.now()) {
+    const prev = periodOf(periodRange(periodOf(now)).start - 1);
+    let made = 0;
+    for (const u of db.prepare("SELECT id FROM users WHERE role = 'user'").all()) {
+      if (db.prepare('SELECT 1 FROM invoices WHERE user_id = ? AND period = ?').get(u.id, prev)) continue;
+      const st = statement(u.id, prev);
+      if (!st.opening && !st.topups && !st.charges && !st.adjustments) continue; // nothing happened: no invoice
+      const number = `SC-${prev.replace('-', '')}-${String(u.id).padStart(5, '0')}`;
+      const r = db.prepare(`INSERT OR IGNORE INTO invoices (user_id, period, number, opening, topups, charges, adjustments, closing, lines, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(u.id, prev, number, st.opening, st.topups, st.charges, st.adjustments, st.closing, JSON.stringify(st.lines), now);
+      made += r.changes;
+    }
+    return made;
+  }
+  const invoiceView = (i) => ({ id: i.id, number: i.number, period: i.period, opening: i.opening, topups: i.topups, charges: i.charges, adjustments: i.adjustments,
+    closing: i.closing, lines: JSON.parse(i.lines || '[]'), createdAt: i.created_at, username: i.username });
+
+  router.get('/billing/invoices', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const uid = isAdmin(req.session) && req.query.user ? Number(req.query.user) : req.session.id;
+    const list = db.prepare('SELECT i.*, u.username FROM invoices i JOIN users u ON u.id = i.user_id WHERE i.user_id = ? ORDER BY period DESC').all(uid).map(invoiceView);
+    // The month so far, not yet an invoice
+    const current = isAdmin(req.session) && !req.query.user ? null : statement(uid, periodOf(Date.now()));
+    res.json({ invoices: list, current, currency: cfg().currency });
+  });
+  router.get('/billing/invoices/:id', (req, res) => {
+    const i = db.prepare('SELECT i.*, u.username, u.full_name, u.email FROM invoices i JOIN users u ON u.id = i.user_id WHERE i.id = ?').get(Number(req.params.id));
+    if (!i || (!isAdmin(req.session) && i.user_id !== req.session.id)) throw notFound('No such invoice');
+    res.set('Cache-Control', 'no-store');
+    res.json({ invoice: { ...invoiceView(i), fullName: i.full_name, email: i.email }, currency: cfg().currency });
+  });
+  router.post('/billing/invoices/run', requireSuperAdmin, (req, res) => {
+    const made = writeInvoices();
+    audit.log({ ...who(req), action: 'invoices_run', result: 'success', detail: `${made} new` });
+    res.json({ created: made });
+  });
+
   let timer = null;
   function startLoop(everyMs = Number(process.env.BILLING_TICK_MS) || 5 * 60_000) {
-    const loop = () => tick().catch((e) => console.error('Billing tick failed:', e.message)).finally(() => { timer = setTimeout(loop, everyMs); timer.unref(); });
+    const loop = () => tick().then(() => writeInvoices()).catch((e) => console.error('Billing tick failed:', e.message)).finally(() => { timer = setTimeout(loop, everyMs); timer.unref(); });
     timer = setTimeout(loop, Math.min(everyMs, 10_000));
     timer.unref();
   }
@@ -261,6 +327,9 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
       price_day: int(b.priceDay ?? old.price_day, { min: 0, max: 1e9, name: 'Price per day (paisa)' }),
       active: (b.active ?? (old.active ?? 1) ? 1 : 0),
       sort: int(b.sort ?? old.sort ?? 0, { min: 0, max: 9999, name: 'Order' }),
+      // packages: how many apps / databases it includes (empty = no limit)
+      max_apps: kind === 'app' ? int(b.maxApps !== undefined ? b.maxApps : old.max_apps, { min: 1, max: 1000, name: 'Max apps', optional: true }) : null,
+      max_databases: int(b.maxDatabases !== undefined ? b.maxDatabases : old.max_databases, { min: 0, max: 1000, name: 'Max databases', optional: true }),
       description: b.description !== undefined ? (b.description ? str(b.description, { max: 200, name: 'Description', re: /^[^<>]*$/ }) : null) : old.description ?? null,
     };
     return out;
@@ -269,8 +338,8 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
     const p = parsePlan(req.body || {});
     if (db.prepare('SELECT 1 FROM plans WHERE kind = ? AND name = ?').get(p.kind, p.name)) throw conflict('A plan with that name exists');
     const now = Date.now();
-    const id = db.prepare(`INSERT INTO plans (kind, name, cpu, memory_mb, disk_gb, price_day, active, sort, description, created_at, updated_at)
-      VALUES (@kind, @name, @cpu, @memory_mb, @disk_gb, @price_day, @active, @sort, @description, @now, @now)`).run({ ...p, now }).lastInsertRowid;
+    const id = db.prepare(`INSERT INTO plans (kind, name, cpu, memory_mb, disk_gb, price_day, active, sort, description, max_apps, max_databases, created_at, updated_at)
+      VALUES (@kind, @name, @cpu, @memory_mb, @disk_gb, @price_day, @active, @sort, @description, @max_apps, @max_databases, @now, @now)`).run({ ...p, now }).lastInsertRowid;
     audit.log({ ...who(req), action: 'plan_create', target: p.name, result: 'success', detail: `${p.kind}, ${p.price_day} paisa/day` });
     res.status(201).json({ plan: planView(plans.get(id)) });
   });
@@ -279,19 +348,19 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
     ['server', 'Server Small', 1, 1024, 20, 4000, 'A small VPS for one website or API'],
     ['server', 'Server Medium', 2, 2048, 40, 7500, 'Several apps, or one busy app'],
     ['server', 'Server Large', 4, 4096, 80, 14000, 'Heavy apps and builds'],
-    ['app', 'App Mini', 1, 512, 5, 1500, 'A small website or API, no server to manage'],
-    ['app', 'App Standard', 1, 1024, 10, 2500, 'Most Node.js / Next.js / Python apps'],
-    ['app', 'App Pro', 2, 2048, 20, 4500, 'Busy apps with heavier builds'],
+    ['app', 'Starter', 1, 1024, 5, 2000, 'One website or API, no server to manage', 1],
+    ['app', 'Professional', 2, 2048, 20, 6000, 'Up to 5 apps', 5],
+    ['app', 'Business', 4, 8192, 50, 18000, 'Up to 15 apps with heavy builds', 15],
     ['database', 'DB Mini', null, 256, null, 1500, 'Small PostgreSQL / MySQL / MongoDB'],
     ['database', 'DB Standard', null, 1024, null, 3000, 'Production database'],
   ];
   router.post('/billing/plans/starter', requireSuperAdmin, (req, res) => {
     const now = Date.now();
     const made = [];
-    STARTER.forEach(([kind, name, cpu, mem, disk, price, description], i) => {
+    STARTER.forEach(([kind, name, cpu, mem, disk, price, description, maxApps = null], i) => {
       if (db.prepare('SELECT 1 FROM plans WHERE kind = ? AND name = ?').get(kind, name)) return;
-      db.prepare(`INSERT INTO plans (kind, name, cpu, memory_mb, disk_gb, price_day, active, sort, description, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`).run(kind, name, cpu, mem, disk, price, i, description, now, now);
+      db.prepare(`INSERT INTO plans (kind, name, cpu, memory_mb, disk_gb, price_day, active, sort, description, max_apps, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`).run(kind, name, cpu, mem, disk, price, i, description, maxApps, now, now);
       made.push(name);
     });
     audit.log({ ...who(req), action: 'plan_starter', result: 'success', detail: made.join(', ') || 'all existed' });
@@ -304,7 +373,7 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
     const p = parsePlan({ ...req.body, kind: old.kind }, old);
     if (db.prepare('SELECT 1 FROM plans WHERE kind = ? AND name = ? AND id != ?').get(p.kind, p.name, old.id)) throw conflict('A plan with that name exists');
     db.prepare(`UPDATE plans SET name = @name, cpu = @cpu, memory_mb = @memory_mb, disk_gb = @disk_gb, price_day = @price_day, active = @active,
-      sort = @sort, description = @description, updated_at = @now WHERE id = @id`).run({ ...p, now: Date.now(), id: old.id });
+      sort = @sort, description = @description, max_apps = @max_apps, max_databases = @max_databases, updated_at = @now WHERE id = @id`).run({ ...p, now: Date.now(), id: old.id });
     // New price applies to resources on this plan from now on (they are settled at the old price first)
     if (p.price_day !== old.price_day && req.body?.applyToExisting === true) {
       for (const r of db.prepare('SELECT * FROM billed_resources WHERE plan_id = ? AND ended_at IS NULL').all(old.id)) settle(r);
@@ -380,7 +449,7 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
   // Welcome credit for self-registered users
   const credit = (userId, amount) => addTx(userId, amount, 'topup', { note: 'Welcome credit', by: 'system' });
 
-  return { router, credit, start, end, endPrefix, rename, settle, tick, startLoop, assertCanAfford, assertCanRun, walletOf, priceFromRates, cfg };
+  return { router, credit, statement, writeInvoices, start, end, endPrefix, rename, settle, tick, startLoop, assertCanAfford, assertCanRun, walletOf, priceFromRates, cfg };
 }
 
 export const money = (paisa, cur = 'NPR') => `${cur} ${(paisa / 100).toFixed(2)}`;

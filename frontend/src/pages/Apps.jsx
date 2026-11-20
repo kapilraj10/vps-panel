@@ -2,21 +2,25 @@ import { useEffect, useRef, useState } from 'react';
 import { api, ago, dateTime, Dialog } from '../lib.jsx';
 import { useLive } from '../live.js';
 import {
-  PageHeader, Card, Badge, Empty, SkeletonRows, ErrorNote, Note, Icon, Field, Tabs, href, go, useApi, useAction, useConfirm,
+  PageHeader, Card, Badge, Empty, SkeletonRows, ErrorNote, Note, Icon, Field, Tabs, Stat, href, go, useApi, useAction, useConfirm,
 } from '../ui.jsx';
 import { fmtMoney } from './Billing.jsx';
 import { UserCreateServer } from './Servers.jsx';
 
 const STATUS_TONE = { running: 'good', deploying: 'warn', provisioning: 'warn', failed: 'bad', stopped: 'neutral', new: 'neutral' };
-const where = (a) => (a.target === 'main' ? 'Main server' : a.container);
-const priceText = (a) => (a.target === 'main' ? (a.priceDay != null ? `${fmtMoney(a.priceDay)}/day${a.planName ? ` · ${a.planName}` : ''}` : 'plan removed') : 'included in the server');
+const where = (a) => (a.target === 'main' ? 'Main server' : a.target === 'vps' ? `My VPS: ${a.serverName}` : a.container);
+const priceText = (a) => (a.target === 'main' ? (a.planName ? `in your ${a.planName} package` : 'hosting package') : a.target === 'vps' ? 'your own server' : 'included in the server');
+const memText = (b) => (b >= 1073741824 ? `${(b / 1073741824).toFixed(2)} GB` : `${Math.round(b / 1048576)} MB`);
 
 // Where to deploy: 1) one of my servers, 2) the main server (no VPS needed, the panel sets it up), 3) a new server
-function TargetPicker({ value, onChange, hasServers, plans, planId, onPlan, onNewServer }) {
+function TargetPicker({ value, onChange, hasServers, hasVps, hosting, planId, onPlan, onNewServer }) {
+  const pkg = hosting?.package;
+  const plans = hosting?.packages;
   const opts = [
-    ['server', 'My server', hasServers ? 'Deploy inside one of your VPS servers' : 'You have no server yet', !hasServers],
-    ['main', 'Main server (direct)', 'No VPS needed. The panel runs it for you on the main server.', false],
-    ['new', 'New server', 'Create a VPS from a plan first, then deploy into it', false],
+    ['main', 'Main server (managed)', 'No VPS needed. Sampanna Cloud runs it for you, with a free subdomain.', false],
+    ['vps', 'My VPS', hasVps ? 'Your own server connected over SSH' : 'Connect your server first (My VPS servers)', !hasVps],
+    ['server', 'My cloud server', hasServers ? 'A server you rent from Sampanna Cloud' : 'You have no cloud server', !hasServers],
+    ['new', 'New server', 'Rent a cloud server from a plan first', false],
   ];
   return (
     <>
@@ -28,19 +32,77 @@ function TargetPicker({ value, onChange, hasServers, plans, planId, onPlan, onNe
           </label>
         ))}
       </div>
-      {value === 'main' && (
-        <Field label="App plan" hint="Charged by the hour from your wallet" wide>
-          <select required value={planId} onChange={(e) => onPlan(e.target.value)}>
-            <option value="">{plans?.length ? 'Pick a plan' : 'No app plans yet: ask the administrator'}</option>
-            {(plans || []).map((p) => <option key={p.id} value={p.id}>{p.name}: {p.cpu} CPU, {p.memoryMb} MB RAM, {p.diskGb} GB · {fmtMoney(p.priceDay)}/day</option>)}
-          </select>
-        </Field>
+      {value === 'main' && pkg && (
+        <Note tone={pkg.maxApps != null && hosting.appsUsed >= pkg.maxApps ? 'warn' : 'info'}>
+          Your hosting package: <strong>{pkg.name}</strong> ({pkg.cpu} CPU, {pkg.memoryMb >= 1024 ? `${pkg.memoryMb / 1024} GB` : `${pkg.memoryMb} MB`} RAM, {pkg.diskGb} GB),
+          {' '}{hosting.appsUsed} of {pkg.maxApps ?? '∞'} apps used, {fmtMoney(pkg.priceDay)}/day.
+          {pkg.maxApps != null && hosting.appsUsed >= pkg.maxApps && <> Upgrade it in <a href={href('wallet')}>Wallet &amp; billing</a> to add more apps.</>}
+        </Note>
+      )}
+      {value === 'main' && !pkg && (
+        <>
+          <p className="muted small">Pick a hosting package. It covers all your apps on the main server; you pay it per day while you have at least one app there.</p>
+          <div className="plan-grid">
+            {(plans || []).map((p) => (
+              <label key={p.id} className={`plan-card ${String(planId) === String(p.id) ? 'is-on' : ''}`}>
+                <input type="radio" name="pkg" value={p.id} checked={String(planId) === String(p.id)} onChange={() => onPlan(String(p.id))} />
+                <strong>{p.name}</strong>
+                <span>{p.cpu} CPU · {p.memoryMb >= 1024 ? `${p.memoryMb / 1024} GB` : `${p.memoryMb} MB`} RAM · {p.diskGb} GB</span>
+                <span>{p.maxApps == null ? 'Unlimited apps' : `${p.maxApps} app${p.maxApps === 1 ? '' : 's'}`}</span>
+                <span className="plan-card__price">{fmtMoney(p.priceDay)}<small>/day</small></span>
+              </label>
+            ))}
+            {plans && !plans.length && <Note tone="warn">No hosting packages yet. Ask the administrator.</Note>}
+          </div>
+        </>
       )}
       {value === 'new' && (
         <Note>Create the server first; when it is running, come back to New application and pick it under “My server”.
           <button type="button" className="btn btn--small btn--primary mt8" onClick={onNewServer}>Create a new server</button></Note>
       )}
     </>
+  );
+}
+
+// Live CPU / RAM of the app's process (refreshes every 10 s)
+function AppStats({ id }) {
+  const { data } = useApi(`/api/apps/${id}/stats`, { interval: 10_000 });
+  if (!data?.running) return null;
+  return (
+    <div className="kpis">
+      <Stat label="Process" icon="activity" value={data.status || '–'} sub={data.uptime ? `up ${ago(data.uptime).replace(' ago', '')}` : ''} />
+      <Stat label="CPU" icon="cpu" value={data.cpu != null ? `${data.cpu}%` : '–'} />
+      <Stat label="Memory" icon="memory" value={data.memory != null ? memText(data.memory) : '–'} />
+      <Stat label="Restarts" icon="refresh" value={data.restarts ?? '–'} />
+    </div>
+  );
+}
+
+// Super admin: move an app to another place of the same customer
+function MoveDialog({ a, onClose, onDone }) {
+  const run = useAction();
+  const vps = useApi('/api/my-servers');
+  const plans = useApi('/api/billing/plans?kind=app');
+  const [f, setF] = useState({ target: 'main', serverId: '', container: '', planId: '' });
+  const theirs = (vps.data?.servers || []).filter((s) => s.userId === a.userId);
+  async function submit(e) {
+    e.preventDefault();
+    const body = { target: f.target, ...(f.target === 'vps' ? { serverId: Number(f.serverId || theirs[0]?.id) } : {}), ...(f.target === 'server' ? { container: f.container } : {}), ...(f.planId ? { planId: Number(f.planId) } : {}) };
+    if (await run(() => api(`/api/apps/${a.id}/move`, { method: 'POST', body }), (r) => `Moved. ${r.oldCopyStopped ? 'Old copy stopped.' : 'The old place could not be reached.'}`)) { onDone(); onClose(); }
+  }
+  return (
+    <Dialog open title={`Move ${a.name}`} onClose={onClose}>
+      <form className="form" onSubmit={submit}>
+        <p className="muted">Now on {where(a)}. The old copy is stopped (its files stay there); the app is deployed at the new place. Its automatic subdomain is made again after the first deploy.</p>
+        <Field label="Move to"><select value={f.target} onChange={(e) => setF({ ...f, target: e.target.value })}>
+          <option value="main">Main server (owner's hosting package)</option><option value="vps">Owner's VPS</option><option value="server">Owner's cloud server</option></select></Field>
+        {f.target === 'main' && <Field label="Package if the owner has none"><select value={f.planId} onChange={(e) => setF({ ...f, planId: e.target.value })}><option value="">Use the owner's package</option>
+          {(plans.data?.plans || []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>}
+        {f.target === 'vps' && <Field label="VPS"><select required value={f.serverId || theirs[0]?.id || ''} onChange={(e) => setF({ ...f, serverId: e.target.value })}>{theirs.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.host})</option>)}</select></Field>}
+        {f.target === 'server' && <Field label="Cloud server name"><input required value={f.container} onChange={(e) => setF({ ...f, container: e.target.value })} /></Field>}
+        <div className="dialog__buttons"><button type="button" className="btn" onClick={onClose}>Cancel</button><button type="submit" className="btn btn--primary">Move</button></div>
+      </form>
+    </Dialog>
   );
 }
 
@@ -52,7 +114,9 @@ function AppForm({ open, onClose, app, onSaved }) {
   const [envText, setEnvText] = useState('');
   const servers = Object.values(cts).filter((c) => me.isAdmin || me.containers.includes(c.name)).map((c) => c.name)
     .filter((n) => !/^apps-/.test(n) || me.isAdmin).sort();
-  const appPlans = useApi(open && !app ? '/api/apps/plans' : null);
+  const hosting = useApi(open && !app ? '/api/hosting' : null);
+  const myVps = useApi(open && !app && !me.isAdmin ? '/api/my-servers' : null);
+  const vpsList = myVps.data?.servers || [];
   const [newServer, setNewServer] = useState(false);
   useEffect(() => {
     if (!open) return;
@@ -60,7 +124,7 @@ function AppForm({ open, onClose, app, onSaved }) {
       setF({ ...app, gitToken: '' });
       api(`/api/apps/${app.id}/env`).then((d) => setEnvText(Object.entries(d.env).map(([k, v]) => `${k}=${v}`).join('\n'))).catch(() => setEnvText(''));
     } else {
-      setF({ target: servers.length ? 'server' : 'main', planId: '', container: servers[0] || '', name: '', type: 'node', repoUrl: '', branch: 'main', rootDir: '', outputDir: '', installCmd: '', buildCmd: '', startCmd: '', port: '', gitToken: '' });
+      setF({ target: 'main', serverId: '', planId: '', container: servers[0] || '', name: '', type: 'node', repoUrl: '', branch: 'main', rootDir: '', outputDir: '', installCmd: '', buildCmd: '', startCmd: '', port: '', gitToken: '' });
       setEnvText('');
     }
   }, [open, app?.id]);
@@ -78,7 +142,9 @@ function AppForm({ open, onClose, app, onSaved }) {
     if (!app && f.target === 'new') return;
     const body = { ...f, port: Number(f.port), env: envText, planId: f.planId ? Number(f.planId) : undefined };
     if (!f.gitToken) delete body.gitToken;
-    if (!app && f.target === 'main') delete body.container;
+    if (!app && f.target !== 'server') delete body.container;
+    if (!app && f.target === 'vps') body.serverId = Number(f.serverId || vpsList[0]?.id);
+    if (!app && f.target !== 'vps') delete body.serverId;
     const r = app ? await run(() => api(`/api/apps/${app.id}`, { method: 'PUT', body }), 'Application saved')
       : await run(() => api('/api/apps', { method: 'POST', body }), `Created ${f.name}`);
     if (r) { onSaved(r.app); onClose(); }
@@ -86,9 +152,10 @@ function AppForm({ open, onClose, app, onSaved }) {
   return (
     <Dialog open={open} title={app ? `Edit ${app.name}` : 'New application'} onClose={onClose} wide>
       <form className="form" onSubmit={submit}>
-        {!app && <TargetPicker value={f.target} onChange={(target) => setF({ ...f, target })} hasServers={servers.length > 0}
-          plans={appPlans.data?.plans} planId={f.planId} onPlan={(planId) => setF({ ...f, planId })} onNewServer={() => setNewServer(true)} />}
+        {!app && <TargetPicker value={f.target} onChange={(target) => setF({ ...f, target })} hasServers={servers.length > 0} hasVps={vpsList.length > 0}
+          hosting={hosting.data} planId={f.planId} onPlan={(planId) => setF({ ...f, planId })} onNewServer={() => setNewServer(true)} />}
         <div className="fgrid">
+          {!app && f.target === 'vps' && <Field label="Your VPS"><select required value={f.serverId || vpsList[0]?.id || ''} onChange={set('serverId')}>{vpsList.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.host}){s.status !== 'online' ? ` · ${s.status}` : ''}</option>)}</select></Field>}
           {!app && f.target === 'server' && <Field label="Server"><select required value={f.container} onChange={set('container')}>{servers.map((s) => <option key={s}>{s}</option>)}</select></Field>}
           {!app && <Field label="App name" hint="Also the PM2 process name"><input required value={f.name} onChange={(e) => setF({ ...f, name: e.target.value.toLowerCase() })} pattern="[a-z][a-z0-9\-]{1,30}[a-z0-9]" /></Field>}
           {!app && <Field label="Type"><select value={f.type} onChange={set('type')}>{(types.data?.types || []).map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}</select></Field>}
@@ -119,7 +186,7 @@ function AppForm({ open, onClose, app, onSaved }) {
 }
 
 function AppDetail({ id }) {
-  const { socket, cts } = useLive();
+  const { socket, cts, me } = useLive();
   const run = useAction();
   const confirm = useConfirm();
   const { data, error, reload } = useApi(`/api/apps/${id}`);
@@ -128,6 +195,7 @@ function AppDetail({ id }) {
   const [viewDep, setViewDep] = useState(null);
   const [logs, setLogs] = useState(null);
   const [editing, setEditing] = useState(false);
+  const [moving, setMoving] = useState(false);
   const logRef = useRef(null);
 
   useEffect(() => {
@@ -142,7 +210,7 @@ function AppDetail({ id }) {
   if (error) return <ErrorNote error={error} />;
   if (!data) return <SkeletonRows />;
   const a = data.app;
-  const serverUp = cts[a.container]?.status === 'Running';
+  const serverUp = a.target === 'vps' || cts[a.container]?.status === 'Running'; // VPS reachability shows on deploy
   const op = async (kind) => { setLiveLog(''); setTab('deploy'); await run(() => api(`/api/apps/${a.id}/${kind}`, { method: 'POST' })); reload(); };
   const showLogs = async () => { setTab('logs'); setLogs(null); const r = await run(() => api(`/api/apps/${a.id}/logs`)); setLogs(r ? r.text : ''); };
   const del = async () => {
@@ -161,9 +229,12 @@ function AppDetail({ id }) {
             <button type="button" className="btn" disabled={a.deploying || !serverUp} onClick={() => op('start')}><Icon name="play" size={14} /> Start</button>
             <button type="button" className="btn" disabled={a.deploying || !serverUp} onClick={() => op('stop')}><Icon name="stop" size={14} /> Stop</button>
             <button type="button" className="btn" onClick={() => setEditing(true)}>Edit</button>
+            {me.role === 'super_admin' && <button type="button" className="btn" onClick={() => setMoving(true)}>Move</button>}
             <button type="button" className="btn btn--danger" onClick={del} aria-label="Delete app"><Icon name="trash" size={14} /></button>
           </div>
         )} />
+      {serverUp && <AppStats id={a.id} />}
+      {a.directUrl && <Note>On your VPS this app listens at <a href={a.directUrl} target="_blank" rel="noreferrer noopener">{a.directUrl}</a> (open the port in the server's firewall, or point your domain at it).</Note>}
       {!serverUp && a.status === 'provisioning' && <Note>Preparing the main server for this app. The first deploy starts by itself; watch the Deploy log.</Note>}
       {!serverUp && a.status !== 'provisioning' && <Note tone="warn">{where(a)} is not running. Start the server to deploy or control this app.</Note>}
       <div className="grid2">
@@ -207,6 +278,7 @@ function AppDetail({ id }) {
         <div className="dialog__buttons"><button type="button" className="btn" onClick={() => setViewDep(null)}>Close</button></div>
       </Dialog>
       <AppForm open={editing} app={a} onClose={() => setEditing(false)} onSaved={reload} />
+      {moving && <MoveDialog a={a} onClose={() => setMoving(false)} onDone={reload} />}
     </>
   );
 }
@@ -215,13 +287,23 @@ export default function Apps({ selected }) {
   const { me } = useLive();
   const { data, error, reload } = useApi('/api/apps', { interval: 20000 });
   const [creating, setCreating] = useState(false);
+  const [q, setQ] = useState('');
+  const [target, setTarget] = useState('all');
   if (selected) return <AppDetail id={selected} />;
-  const apps = data?.apps || [];
+  const apps = (data?.apps || [])
+    .filter((a) => target === 'all' || (a.target || 'server') === target)
+    .filter((a) => !q || `${a.name} ${a.owner} ${a.repoUrl} ${where(a)}`.toLowerCase().includes(q.toLowerCase()));
   return (
     <>
       <PageHeader title="Applications" sub="Deploy from Git into your servers. Each app runs under PM2 inside its server."
         actions={<button type="button" className="btn btn--primary" onClick={() => setCreating(true)}><Icon name="plus" size={16} /> New application</button>} />
       <ErrorNote error={error} onRetry={reload} />
+      {(data?.apps || []).length > 3 && (
+        <div className="filters">
+          <div className="input-icon"><Icon name="search" size={16} /><input placeholder={me.isAdmin ? 'Filter by app, owner or repository' : 'Filter'} value={q} onChange={(e) => setQ(e.target.value)} /></div>
+          <div className="seg">{[['all', 'all'], ['main', 'main server'], ['vps', 'VPS'], ['server', 'cloud server']].map(([id, label]) => <button key={id} type="button" aria-pressed={target === id} onClick={() => setTarget(id)}>{label}</button>)}</div>
+        </div>
+      )}
       <Card pad={false}>
         {!data ? <div className="pad"><SkeletonRows /></div> : apps.length ? (
           <div className="table-wrap"><table className="table">

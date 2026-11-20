@@ -43,6 +43,82 @@ function ResourceTable({ list, cur, onEnd }) {
   );
 }
 
+// ---------- invoices ----------
+function InvoiceView({ id, onClose }) {
+  const { data, error } = useApi(`/api/billing/invoices/${id}`);
+  const i = data?.invoice;
+  const cur = data?.currency;
+  return (
+    <Dialog open wide title={i ? `Invoice ${i.number}` : 'Invoice'} onClose={onClose}>
+      <ErrorNote error={error} />
+      {!i ? <SkeletonRows /> : (
+        <div className="invoice">
+          <div className="invoice__head"><div><strong>Sampanna Cloud</strong><br /><span className="muted">Kathmandu, Nepal</span></div>
+            <div className="num"><strong>{i.number}</strong><br />Period {i.period}<br /><span className="muted">{i.fullName || i.username}{i.email ? ` · ${i.email}` : ''}</span></div></div>
+          <table className="table"><thead><tr><th>Service</th><th>Plan</th><th className="num">Hours billed</th><th className="num">Amount</th></tr></thead>
+            <tbody>{i.lines.map((l) => <tr key={`${l.kind}-${l.name}`}><td>{l.kind} {l.name}</td><td className="muted">{l.plan || 'custom'}</td><td className="num">{l.hours}</td><td className="num">{fmtMoney(l.amount, cur)}</td></tr>)}
+              {!i.lines.length && <tr><td colSpan={4} className="muted">No usage this month</td></tr>}</tbody></table>
+          <dl className="invoice__sum">
+            <dt>Opening balance</dt><dd>{fmtMoney(i.opening, cur)}</dd>
+            <dt>Top-ups and credits</dt><dd>+{fmtMoney(i.topups, cur)}</dd>
+            <dt>Charges</dt><dd>−{fmtMoney(i.charges, cur)}</dd>
+            {i.adjustments !== 0 && <><dt>Corrections</dt><dd>{fmtMoney(i.adjustments, cur)}</dd></>}
+            <dt><strong>Closing balance</strong></dt><dd><strong>{fmtMoney(i.closing, cur)}</strong></dd>
+          </dl>
+          <p className="muted small">Prepaid statement: charges were taken from the wallet hourly. Prices in {cur}.</p>
+        </div>
+      )}
+      <div className="dialog__buttons"><button type="button" className="btn" onClick={() => window.print()}>Print / save as PDF</button><button type="button" className="btn btn--primary" onClick={onClose}>Close</button></div>
+    </Dialog>
+  );
+}
+
+function Invoices({ user }) {
+  const { data, error } = useApi(`/api/billing/invoices${user ? `?user=${user}` : ''}`);
+  const [open, setOpen] = useState(null);
+  const cur = data?.currency;
+  return (
+    <Card title="Invoices" sub="A statement is made for every month with activity (Nepal time)" pad={false}>
+      <ErrorNote error={error} />
+      {!data ? <div className="pad"><SkeletonRows rows={2} /></div> : (
+        <div className="table-wrap"><table className="table">
+          <thead><tr><th>Month</th><th>Number</th><th className="num">Charges</th><th className="num">Top-ups</th><th className="num">Closing balance</th><th /></tr></thead>
+          <tbody>
+            {data.current && <tr><td>{data.current.period} <Badge tone="warn">so far</Badge></td><td className="muted">–</td><td className="num">{fmtMoney(data.current.charges, cur)}</td><td className="num">{fmtMoney(data.current.topups, cur)}</td><td className="num">{fmtMoney(data.current.closing, cur)}</td><td /></tr>}
+            {data.invoices.map((i) => <tr key={i.id}><td>{i.period}</td><td className="mono small">{i.number}</td><td className="num">{fmtMoney(i.charges, cur)}</td><td className="num">{fmtMoney(i.topups, cur)}</td><td className="num">{fmtMoney(i.closing, cur)}</td>
+              <td><button type="button" className="btn btn--small" onClick={() => setOpen(i.id)}>View</button></td></tr>)}
+          </tbody>
+        </table></div>
+      )}
+      {open && <InvoiceView id={open} onClose={() => setOpen(null)} />}
+    </Card>
+  );
+}
+
+function HostingPackage() {
+  const run = useAction();
+  const { data, reload } = useApi('/api/hosting');
+  const [pick, setPick] = useState('');
+  if (!data) return null;
+  const pkg = data.package;
+  return (
+    <Card title="Hosting package (main server)" sub={pkg ? 'Covers all your apps on the main server' : 'Starts with your first app on the main server (Applications → New application → Main server)'}>
+      {pkg ? (
+        <>
+          <p><strong>{pkg.name}</strong> · {pkg.cpu} CPU · {pkg.memoryMb >= 1024 ? `${pkg.memoryMb / 1024} GB` : `${pkg.memoryMb} MB`} RAM · {pkg.diskGb} GB · {data.appsUsed} of {pkg.maxApps ?? '∞'} apps · {fmtMoney(pkg.priceDay)}/day</p>
+          <div className="inline-form">
+            <select value={pick} onChange={(e) => setPick(e.target.value)}>
+              <option value="">Change package…</option>
+              {data.packages.filter((p) => p.id !== pkg.id).map((p) => <option key={p.id} value={p.id}>{p.name}: {p.maxApps ?? '∞'} apps, {p.cpu} CPU, {p.memoryMb} MB, {p.diskGb} GB · {fmtMoney(p.priceDay)}/day</option>)}
+            </select>
+            <button type="button" className="btn btn--primary" disabled={!pick} onClick={async () => { if (await run(() => api('/api/hosting', { method: 'PUT', body: { planId: Number(pick) } }), 'Package changed')) { setPick(''); reload(); } }}>Change</button>
+          </div>
+        </>
+      ) : <p className="muted">No package yet.</p>}
+    </Card>
+  );
+}
+
 // ---------- user ----------
 export function Wallet() {
   const { data, error, reload } = useApi('/api/billing/me', { interval: 60_000 });
@@ -66,6 +142,8 @@ export function Wallet() {
       <Card title="Prices" sub="Create a server from My servers → New server, or a database from Managed databases." pad={false}>
         {!plans.data ? <div className="pad"><SkeletonRows /></div> : <PlanTable plans={plans.data.plans} cur={cur} />}
       </Card>
+      <HostingPackage />
+      <Invoices />
       <Card title="Transactions" pad={false}>{!data ? <div className="pad"><SkeletonRows /></div> : <TxTable list={data.transactions} cur={cur} />}</Card>
     </>
   );
@@ -78,8 +156,8 @@ function PlanTable({ plans, cur, onEdit, onDelete }) {
       <thead><tr><th>Plan</th><th>Kind</th><th>Size</th><th className="num">Per day</th><th className="num">Per month (30 d)</th>{onEdit && <th />}</tr></thead>
       <tbody>{plans.map((p) => (
         <tr key={p.id}><td><strong>{p.name}</strong> {!p.active && <Badge>hidden</Badge>}{p.description && <small className="block muted">{p.description}</small>}</td>
-          <td>{{ server: 'Server', app: 'App (main server)', database: 'Database' }[p.kind] || p.kind}</td>
-          <td className="muted">{p.kind !== 'database' ? `${p.cpu} CPU · ${p.memoryMb >= 1024 ? `${p.memoryMb / 1024} GB` : `${p.memoryMb} MB`} RAM · ${p.diskGb} GB disk` : `${p.memoryMb} MB RAM`}</td>
+          <td>{{ server: 'Server', app: 'Hosting package', database: 'Database' }[p.kind] || p.kind}</td>
+          <td className="muted">{p.kind === 'app' && <strong>{p.maxApps == null ? 'Unlimited apps' : `${p.maxApps} app${p.maxApps === 1 ? '' : 's'}`} · </strong>}{p.kind !== 'database' ? `${p.cpu} CPU · ${p.memoryMb >= 1024 ? `${p.memoryMb / 1024} GB` : `${p.memoryMb} MB`} RAM · ${p.diskGb} GB disk` : `${p.memoryMb} MB RAM`}</td>
           <td className="num">{fmtMoney(p.priceDay, cur)}</td><td className="num muted">{fmtMoney(p.priceDay * 30, cur)}</td>
           {onEdit && <td><div className="row-actions"><button type="button" className="btn btn--small" onClick={() => onEdit(p)}>Edit</button>
             <button type="button" className="btn btn--small btn--danger" onClick={() => onDelete(p)}>Delete</button></div></td>}</tr>
@@ -93,7 +171,7 @@ function PlanDialog({ plan, rates, cur, onClose, onDone }) {
   const run = useAction();
   const [f, setF] = useState(() => ({
     kind: plan?.kind || 'server', name: plan?.name || '', cpu: plan?.cpu ?? 1, memoryMb: plan?.memoryMb ?? 1024, diskGb: plan?.diskGb ?? 20,
-    price: plan ? (plan.priceDay / 100).toFixed(2) : '', active: plan ? plan.active : true, description: plan?.description || '', sort: plan?.sort ?? 0, applyToExisting: false,
+    price: plan ? (plan.priceDay / 100).toFixed(2) : '', active: plan ? plan.active : true, maxApps: plan?.maxApps ?? '', description: plan?.description || '', sort: plan?.sort ?? 0, applyToExisting: false,
   }));
   const set = (k) => (e) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
   const suggested = Math.round((rates.cpuDay || 0) * (f.kind !== 'database' ? Number(f.cpu) : 0) + ((rates.ramGbDay || 0) * Number(f.memoryMb)) / 1024
@@ -101,7 +179,8 @@ function PlanDialog({ plan, rates, cur, onClose, onDone }) {
   async function submit(e) {
     e.preventDefault();
     const body = { kind: f.kind, name: f.name, memoryMb: Number(f.memoryMb), priceDay: toPaisa(f.price), active: f.active, description: f.description, sort: Number(f.sort) || 0,
-      ...(f.kind !== 'database' ? { cpu: Number(f.cpu), diskGb: Number(f.diskGb) } : {}), applyToExisting: f.applyToExisting };
+      ...(f.kind !== 'database' ? { cpu: Number(f.cpu), diskGb: Number(f.diskGb) } : {}), applyToExisting: f.applyToExisting,
+      ...(f.kind === 'app' ? { maxApps: f.maxApps === '' ? null : Number(f.maxApps) } : {}) };
     const ok = await run(() => api(plan ? `/api/billing/plans/${plan.id}` : '/api/billing/plans', { method: plan ? 'PUT' : 'POST', body }), plan ? 'Plan saved' : 'Plan created');
     if (ok) { onDone(); onClose(); }
   }
@@ -109,7 +188,7 @@ function PlanDialog({ plan, rates, cur, onClose, onDone }) {
     <Dialog open title={plan ? `Edit plan ${plan.name}` : 'New plan'} onClose={onClose} wide>
       <form className="form" onSubmit={submit}>
         <div className="fgrid">
-          <Field label="Kind"><select value={f.kind} disabled={!!plan} onChange={set('kind')}><option value="server">Server (LXD VPS)</option><option value="app">App on the main server</option><option value="database">Managed database</option></select></Field>
+          <Field label="Kind"><select value={f.kind} disabled={!!plan} onChange={set('kind')}><option value="server">Server (LXD VPS)</option><option value="app">Hosting package (apps on the main server)</option><option value="database">Managed database</option></select></Field>
           <Field label="Name"><input required maxLength={40} value={f.name} onChange={set('name')} placeholder="Small" /></Field>
           {f.kind !== 'database' && <Field label="CPU cores"><input type="number" min={1} max={64} required value={f.cpu} onChange={set('cpu')} /></Field>}
           <Field label="Memory (MB)"><input type="number" min={128} step={128} required value={f.memoryMb} onChange={set('memoryMb')} /></Field>
@@ -117,6 +196,7 @@ function PlanDialog({ plan, rates, cur, onClose, onDone }) {
           <Field label={`Price per day (${cur})`} hint={suggested ? `From your rates: ${fmtMoney(suggested, cur)}/day` : `${fmtMoney(toPaisa(f.price || 0) * 30, cur)} per 30 days`}>
             <input type="number" min={0} step="0.01" required value={f.price} onChange={set('price')} placeholder="50.00" />
           </Field>
+          {f.kind === 'app' && <Field label="Apps included" hint="Empty = unlimited"><input type="number" min={1} value={f.maxApps} onChange={set('maxApps')} placeholder="5" /></Field>}
           <Field label="Order"><input type="number" min={0} value={f.sort} onChange={set('sort')} /></Field>
         </div>
         <Field label="Description (shown to users)" wide><input maxLength={200} value={f.description} onChange={set('description')} placeholder="Good for a small website" /></Field>
@@ -182,6 +262,7 @@ function UserWallet({ id, cur, onClose }) {
           <p className="muted small">Use this for servers you assigned before billing existed, or to give one user a special price.</p>
           <h3>Transactions</h3>
           <TxTable list={data.transactions} cur={cur} />
+          <Invoices user={id} />
         </>
       )}
       <div className="dialog__buttons"><button type="button" className="btn btn--primary" onClick={onClose}>Close</button></div>

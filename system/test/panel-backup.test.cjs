@@ -169,7 +169,7 @@ test('database images are recognised', () => {
     'postgres:16': 'postgres', 'postgis/postgis:16-3.4': 'postgres', 'timescale/timescaledb:latest-pg16': 'postgres',
     'pgvector/pgvector:pg16': 'postgres', 'mysql:8': 'mysql', 'mariadb:11': 'mysql', 'mongo:7': 'mongo',
     'mongodb/mongodb-community-server:7.0-ubuntu2204': 'mongo', 'mongo-express:latest': null, 'nginx:alpine': null,
-    'redis:7': null, 'ghcr.io/me/postgres-backup-ui:1': 'postgres',
+    'redis:7': 'redis', 'redis:8-alpine': 'redis', 'bitnami/redis:7.2': 'redis', 'rediscommander/redis-commander:latest': null, 'redis-commander:1': null, 'ghcr.io/me/postgres-backup-ui:1': 'postgres',
   };
   for (const [image, kind] of Object.entries(cases)) assert.equal(h.dbKind(image), kind, image);
 });

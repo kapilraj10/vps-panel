@@ -36,7 +36,7 @@ before(async () => {
     cwd: path.join(here, '..'),
     env: {
       ...process.env, PORT: String(PORT), HOST: '127.0.0.1', DB_PATH: DB, LXD_SOCKET: SOCK, SESSION_SECRET: 'x'.repeat(64), STAGING_MODE: '1',
-      COOKIE_SECURE: 'false', SAMPLE_MS: '300', BACKUP_HELPER: '/nonexistent/panel-backup', BACKUP_STATE_DIR: path.join(tmp, 'state'), BACKUP_DISK_CHECK: 'off', MONITOR_SERVICES: '', CF_API_TOKEN: '',
+      COOKIE_SECURE: 'false', GIT_CHECK: 'off', SAMPLE_MS: '300', BACKUP_HELPER: '/nonexistent/panel-backup', BACKUP_STATE_DIR: path.join(tmp, 'state'), BACKUP_DISK_CHECK: 'off', MONITOR_SERVICES: '', CF_API_TOKEN: '',
     },
   });
   proc.stdout.on('data', (b) => { logs += b; });

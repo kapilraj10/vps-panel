@@ -90,6 +90,12 @@ const codeAt = (secret, offset = 0) => totp(fromBase32(secret), Math.floor(Date.
 before(async () => {
   fs.mkdirSync(HOME, { recursive: true });
   fs.writeFileSync(path.join(tmp, 'kapil-security'), FAKE_HELPER, { mode: 0o755 });
+  // Stub docker CLI (dump/restore): records its arguments and what it got on stdin
+  fs.writeFileSync(path.join(tmp, 'docker-cli'), `#!/bin/sh
+echo "$*" >> ${JSON.stringify(path.join(tmp, 'docker-cli.log'))}
+if [ "$2" = "-i" ]; then cat > ${JSON.stringify(path.join(tmp, 'restored.sql'))}; echo restored; exit 0; fi
+case "$4 $5" in *) printf 'CREATE TABLE t (id int);\n' ;; esac
+`, { mode: 0o755 });
   const d = new Database(DB);
   d.exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('admin', 'user')), container_name TEXT, created_at INTEGER NOT NULL)`);
@@ -102,9 +108,9 @@ before(async () => {
     cwd: path.join(here, '..'),
     env: {
       ...process.env, HOME, PORT: String(PORT), HOST: '127.0.0.1', DB_PATH: DB, LXD_SOCKET: path.join(tmp, 'lxd.sock'), SESSION_SECRET: 'z'.repeat(64),
-      COOKIE_SECURE: 'false', BACKUP_HELPER: '/nonexistent', BACKUP_STATE_DIR: path.join(tmp, 'state'), BACKUP_DISK_CHECK: 'off', MONITOR_SERVICES: '',
+      COOKIE_SECURE: 'false', GIT_CHECK: 'off', BACKUP_HELPER: '/nonexistent', BACKUP_STATE_DIR: path.join(tmp, 'state'), BACKUP_DISK_CHECK: 'off', MONITOR_SERVICES: '',
       DOCKER_SOCKET: path.join(tmp, 'docker.sock'), DB_PORTS: `${DBP}-${DBP + 5}`,
-      SECURITY_HELPER: path.join(tmp, 'kapil-security'), SECURITY_SUDO: 'off',
+      SECURITY_HELPER: path.join(tmp, 'kapil-security'), SECURITY_SUDO: 'off', DOCKER_CLI: path.join(tmp, 'docker-cli'),
     },
   });
   proc.stdout.on('data', (x) => { logs += x; });
@@ -133,9 +139,9 @@ test('databases: roles, validation, options', async () => {
   assert.equal((await ops.get('/api/databases')).status, 200);
   assert.equal((await ops.post('/api/databases', { name: 'shop', engine: 'postgres' })).status, 403, 'plain admins read only');
   const o = await sup.get('/api/databases/options');
-  assert.deepEqual(Object.keys(o.data.engines).sort(), ['mongo', 'mysql', 'postgres']);
+  assert.deepEqual(Object.keys(o.data.engines).sort(), ['mongo', 'mysql', 'postgres', 'redis']);
   assert.ok(o.data.access.some((a) => a.id === 'containers' && a.label.includes('10.10.10.1')), 'LXD bridge offered');
-  for (const bad of [{ name: 'X', engine: 'postgres' }, { name: 'ok-name', engine: 'redis' }, { name: 'ok-name', engine: 'postgres', version: '9' },
+  for (const bad of [{ name: 'X', engine: 'postgres' }, { name: 'ok-name', engine: 'cassandra' }, { name: 'ok-name', engine: 'postgres', version: '9' },
     { name: 'ok-name', engine: 'postgres', user: 'Robert;drop' }, { name: 'ok-name', engine: 'mysql', user: 'root' }, { name: 'ok-name', engine: 'postgres', access: 'public' }]) {
     assert.equal((await sup.post('/api/databases', bad)).status, 400, JSON.stringify(bad));
   }
@@ -183,6 +189,39 @@ test('databases: create PostgreSQL, MySQL and MongoDB safely, credentials audite
   const kdb = (await sup.get('/api/docker/containers')).data.containers.find((x) => x.name === 'kdb-shop');
   assert.equal(kdb.managedDb, 'shop');
   assert.equal((await sup.del(`/api/docker/containers/${kdb.id}`, { confirm: 'kdb-shop', force: true })).status, 400, 'not removable from the Docker page');
+});
+
+test('databases: Redis (password from env), live stats, dump download, restore from a .gz upload', async () => {
+  const r = await sup.post('/api/databases', { name: 'cache', engine: 'redis' });
+  assert.equal(r.status, 202, JSON.stringify(r.data));
+  await until(async () => (await sup.get('/api/databases')).data.databases.find((x) => x.name === 'cache')?.status === 'ready');
+  const body = docker.calls.find((c) => c.path === '/containers/create' && c.query.name === 'kdb-cache').body;
+  assert.deepEqual(body.Cmd, ['sh', '-c', 'exec redis-server --requirepass "$REDIS_PASSWORD" --appendonly yes']);
+  assert.ok(body.Env.some((e) => e.startsWith('REDIS_PASSWORD=')), 'password via env, not on the command line');
+  const cache = r.data.database;
+  const c = (await sup.get(`/api/databases/${cache.id}/credentials`)).data;
+  assert.match(c.url, /^redis:\/\/default:[A-Za-z0-9_-]+@127\.0\.0\.1:\d+\/0$/);
+  const st = (await ops.get(`/api/databases/${cache.id}/stats`)).data;
+  assert.equal(st.running, true);
+  assert.ok(st.memory > 0 && st.memoryLimit > 0);
+  assert.equal((await sup.post(`/api/databases/${cache.id}/restore?confirm=cache`)).status, 400, 'no Redis restore from the panel');
+
+  const events = (await sup.get('/api/databases')).data.databases.find((x) => x.name === 'events');
+  const dl = await fetch(`${BASE}/api/databases/${events.id}/dump`, { headers: { cookie: sup.cookie } });
+  assert.equal(dl.status, 200);
+  assert.match(dl.headers.get('content-disposition'), /events-\d{4}-\d{2}-\d{2}\.archive\.gz/);
+  const zlib = await import('node:zlib');
+  assert.equal(zlib.gunzipSync(Buffer.from(await dl.arrayBuffer())).toString(), 'CREATE TABLE t (id int);\n');
+  assert.equal((await ops.get(`/api/databases/${events.id}/dump`)).status, 403, 'plain admins cannot pull data');
+
+  const up = (q) => fetch(`${BASE}/api/databases/${events.id}/restore${q}`, { method: 'POST', headers: { cookie: sup.cookie, 'x-csrf-token': sup.csrf, 'content-type': 'application/octet-stream' }, body: zlib.gzipSync('INSERT INTO t VALUES (1);\n') });
+  assert.equal((await up('')).status, 400, 'typed confirmation required');
+  const ok = await up('?confirm=events');
+  assert.equal(ok.status, 200, await ok.clone().text());
+  assert.equal(fs.readFileSync(path.join(tmp, 'restored.sql'), 'utf8'), 'INSERT INTO t VALUES (1);\n', 'gunzipped into the restore tool');
+  assert.match(fs.readFileSync(path.join(tmp, 'docker-cli.log'), 'utf8'), /exec -i kdb-events sh -c exec mongorestore --archive --drop/);
+  const audit = (await sup.get('/api/audit?action=database_restore')).data.entries;
+  assert.equal(audit[0].result, 'success');
 });
 
 test('databases: stop/start, logs, delete keeps the volume unless asked', async () => {

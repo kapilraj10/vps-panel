@@ -4,8 +4,24 @@ import { useLive } from '../live.js';
 import {
   PageHeader, Card, Stat, Bar, Badge, ServerStatus, TimeChart, Empty, SkeletonRows, ErrorNote, Icon, href, useApi,
 } from '../ui.jsx';
+import { fmtMoney } from './Billing.jsx';
 
 const GiB = 1024 ** 3;
+
+// Platform business numbers (admins): money, customers' apps / databases / VPS
+function CloudKpis({ c }) {
+  if (!c) return null;
+  return (
+    <div className="kpis">
+      <Stat label="Revenue this month" icon="chart" value={fmtMoney(c.revenue.month, c.currency)} sub={`${fmtMoney(c.revenue.perDay, c.currency)}/day now · top-ups ${fmtMoney(c.revenue.topupsMonth, c.currency)}`} />
+      <Stat label="Money in wallets" icon="storage" tone={c.wallets.suspended ? 'bad' : ''} value={fmtMoney(c.wallets.total, c.currency)} sub={`${c.wallets.customers} customers · ${c.wallets.empty} empty${c.wallets.suspended ? ` · ${c.wallets.suspended} suspended` : ''}`} />
+      <Stat label="Customer apps" icon="app" value={c.apps.total} sub={`${c.apps.running} running · ${c.apps.main} main · ${c.apps.vps} VPS · ${c.apps.server} cloud server`} />
+      <Stat label="Databases" icon="disk" value={c.databases.total} sub={`${c.databases.main} main server · ${c.databases.vps} on customer VPS`} />
+      <Stat label="Customer VPS" icon="network" value={c.customerVps} sub={`${c.customerVpsOnline} online`} />
+      <Stat label="Active packages" icon="users" value={c.packages} sub={`${c.billedResources} billed services`} />
+    </div>
+  );
+}
 export const levelTone = (l) => (l === 'critical' ? 'bad' : l === 'warning' ? 'warn' : 'neutral');
 
 export function AlertList({ alerts, limit = 6, empty = 'No open alerts. Everything looks healthy.' }) {
@@ -79,6 +95,7 @@ function AdminOverview() {
         <Stat label="Uptime" icon="monitor" value={up ? uptime(up) : null} sub={info?.kernel ? `Kernel ${info.kernel}` : ''} />
       </div>
 
+      <CloudKpis c={d?.cloud} />
       <div className="kpis kpis--fleet">
         <Stat label="Servers" icon="server" value={d ? d.servers.total : null} sub={d ? `${d.servers.running} running · ${d.servers.stopped} stopped` : ''} />
         <Stat label="Users" icon="users" value={d ? d.users.total : null} sub={d ? `${d.users.active} active now${d.users.suspended ? ` · ${d.users.suspended} suspended` : ''}` : ''} />
@@ -152,26 +169,31 @@ function UserOverview() {
   const diskMax = list.reduce((s, c) => s + (c.diskTotal || 0), 0);
   return (
     <>
-      <PageHeader title={`Welcome, ${me.fullName || me.username}`} sub="Your private cloud at a glance" />
+      <PageHeader title={`Welcome, ${me.fullName || me.username}`} sub="Your cloud at a glance"
+        actions={<a className="btn btn--primary" href={href('apps')}><Icon name="plus" size={16} /> Deploy an app</a>} />
       <div className="kpis">
-        <Stat label="Servers" icon="server" value={ov.data ? ov.data.servers.total : list.length} sub={`${list.filter((c) => c.status === 'Running').length} running`} />
-        <Stat label="Memory in use" icon="memory" value={bytes(mem)} sub={memMax ? `of ${bytes(memMax)}` : ''}><Bar value={pct(mem, memMax)} /></Stat>
-        <Stat label="Storage in use" icon="storage" value={bytes(disk)} sub={diskMax ? `of ${bytes(diskMax)}` : ''}><Bar value={pct(disk, diskMax)} /></Stat>
-        <Stat label="Applications" icon="app" value={ov.data?.apps ?? null} sub={ov.data ? `${ov.data.domains} live domain(s)` : ''} />
+        <Stat label="Wallet" icon="storage" tone={ov.data?.wallet?.state !== 'ok' || ov.data?.wallet?.low ? 'bad' : ''} value={ov.data?.wallet ? fmtMoney(ov.data.wallet.balance, ov.data.wallet.currency) : null}
+          sub={ov.data?.wallet ? `${fmtMoney(ov.data.wallet.burnPerDay, ov.data.wallet.currency)}/day · ${ov.data.wallet.daysLeft ?? '∞'} days left` : ''} />
+        <Stat label="Applications" icon="app" value={ov.data?.cloud?.apps.total ?? null} sub={ov.data ? `${ov.data.cloud.apps.running} running · ${ov.data.domains} live domain(s)` : ''} />
+        <Stat label="Databases" icon="disk" value={ov.data?.cloud?.databases.total ?? null} sub={ov.data ? `${ov.data.cloud.databases.main} managed · ${ov.data.cloud.databases.vps} on my VPS` : ''} />
+        <Stat label="My VPS" icon="network" value={ov.data?.cloud?.customerVps ?? null} sub={ov.data ? `${ov.data.cloud.customerVpsOnline} online` : ''} />
+        {list.length > 0 && <Stat label="Cloud servers" icon="server" value={list.length} sub={`${list.filter((c) => c.status === 'Running').length} running · ${bytes(mem)} of ${bytes(memMax)} RAM`}><Bar value={pct(mem, memMax)} /></Stat>}
+        {list.length > 0 && <Stat label="Storage in use" icon="storage" value={bytes(disk)} sub={diskMax ? `of ${bytes(diskMax)}` : ''}><Bar value={pct(disk, diskMax)} /></Stat>}
       </div>
       <div className="grid2 grid2--wide-left">
         <Card title="My servers" pad={false}>
           {list.length ? list.map((c) => <ServerRow key={c.name} c={c} job={jobs[c.name]} />)
-            : <Empty icon="server" title="No servers assigned yet">Ask the administrator to provision a server for you.</Empty>}
+            : <Empty icon="server" title="No cloud servers">You don't need one: deploy apps on the main server, or connect your own VPS.</Empty>}
         </Card>
         <Card title="Alerts"><AlertList alerts={alerts} empty="Nothing needs your attention." /></Card>
       </div>
       <Card title="Quick actions">
         <div className="quick">
-          <a className="quick__item" href={href('terminal')}><Icon name="terminal" /> Open a terminal</a>
           <a className="quick__item" href={href('apps')}><Icon name="app" /> Deploy an application</a>
-          <a className="quick__item" href={href('ssh-keys')}><Icon name="key" /> Add an SSH key</a>
-          <a className="quick__item" href={href('backups')}><Icon name="camera" /> Take a snapshot</a>
+          <a className="quick__item" href={href('databases')}><Icon name="disk" /> Create a database</a>
+          <a className="quick__item" href={href('my-servers')}><Icon name="network" /> Connect your VPS</a>
+          <a className="quick__item" href={href('domains')}><Icon name="globe" /> Add a domain</a>
+          <a className="quick__item" href={href('wallet')}><Icon name="chart" /> Wallet &amp; invoices</a>
         </div>
       </Card>
     </>

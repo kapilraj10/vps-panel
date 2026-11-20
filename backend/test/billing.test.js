@@ -91,7 +91,7 @@ before(async () => {
     cwd: path.join(here, '..'),
     env: {
       ...process.env, HOME, PORT: String(PORT), HOST: '127.0.0.1', DB_PATH: DB, LXD_SOCKET: path.join(tmp, 'lxd.sock'), SESSION_SECRET: 'b'.repeat(64),
-      COOKIE_SECURE: 'false', BACKUP_HELPER: '/nonexistent', BACKUP_STATE_DIR: path.join(tmp, 'state'), BACKUP_DISK_CHECK: 'off', MONITOR_SERVICES: '',
+      COOKIE_SECURE: 'false', GIT_CHECK: 'off', BACKUP_HELPER: '/nonexistent', BACKUP_STATE_DIR: path.join(tmp, 'state'), BACKUP_DISK_CHECK: 'off', MONITOR_SERVICES: '',
       DOCKER_SOCKET: path.join(tmp, 'docker.sock'), DB_PORTS: `${DBP}-${DBP + 5}`, BILLING_TICK_MS: '400',
     },
   });
@@ -246,56 +246,79 @@ test('users delete only servers they made; billing ends; admin can bill an exist
   assert.ok(ov.totals.charged30d >= 7200);
 });
 
-test('main server target: app plan, managed app host made, runtime + deploy run, billed, deleted with the last app', async () => {
-  const p = await sup.post('/api/billing/plans', { kind: 'app', name: 'App S', cpu: 1, memoryMb: 512, diskGb: 5, priceDay: 1200 });
+test('main server target: hosting package, app host sized by it, max apps, non-root runs, package ends with the last app', async () => {
+  const p = await sup.post('/api/billing/plans', { kind: 'app', name: 'Pkg Two', cpu: 1, memoryMb: 512, diskGb: 5, priceDay: 1200, maxApps: 2 });
   assert.equal(p.status, 201, JSON.stringify(p.data));
-  const plans = (await bob.get('/api/apps/plans')).data.plans;
-  assert.equal(plans[0].name, 'App S');
+  assert.equal(p.data.plan.maxApps, 2);
+  const big = (await sup.post('/api/billing/plans', { kind: 'app', name: 'Pkg Big', cpu: 2, memoryMb: 1024, diskGb: 10, priceDay: 3000, maxApps: 5 })).data.plan;
+  const h0 = (await bob.get('/api/hosting')).data;
+  assert.equal(h0.package, null);
+  assert.ok(h0.packages.some((x) => x.name === 'Pkg Two'));
   const body = { target: 'main', planId: p.data.plan.id, name: 'shop', type: 'node', repoUrl: 'https://github.com/x/shop.git', branch: 'main' };
-  assert.equal((await bob.post('/api/apps', { ...body, planId: undefined })).status, 400, 'plan required');
+  assert.equal((await bob.post('/api/apps', { ...body, planId: undefined })).status, 400, 'package required for the first app');
   assert.equal((await bob.post('/api/apps', body)).status, 402, 'bob cannot afford it with his server bill');
   await sup.post(`/api/billing/users/${ids.bob}/tx`, { amount: 50000 });
   const r = await bob.post('/api/apps', body);
   assert.equal(r.status, 201, JSON.stringify(r.data));
   const id = r.data.app.id;
   assert.equal(r.data.app.container, 'apps-bob');
-  assert.equal(r.data.app.target, 'main');
+  assert.equal(r.data.app.planName, 'Pkg Two');
   const done = await until(async () => { const d = (await bob.get(`/api/apps/${id}`)).data; return d.app.status === 'running' ? d : null; }, 30000);
   assert.deepEqual(done.deployments.map((d) => d.kind).reverse(), ['provision', 'runtime', 'deploy']);
-  const inst = lxd.calls.filter((c) => c.method === 'POST' && c.path === '/1.0/instances').map((c) => c.body).find((b) => b.name === 'apps-bob');
+  const inst = lxd.calls.filter((c) => c.method === 'POST' && c.path === '/1.0/instances').map((c) => c.body).find((x) => x.name === 'apps-bob');
   assert.equal(inst.config['security.privileged'], 'false');
-  assert.equal(inst.config['limits.memory'], '512MiB');
+  assert.equal(inst.config['limits.memory'], '512MiB', 'sized by the package');
+  const execs = lxd.calls.filter((c) => c.path === '/1.0/instances/apps-bob/exec');
+  assert.ok(execs.length >= 2 && execs.every((c) => c.body.environment.RUN_AS === 'app'), JSON.stringify(execs.map((c) => [c.body.command.slice(0, 2).join(' ').slice(0, 60), c.body.environment.RUN_AS, Object.keys(c.body.environment)])));
   assert.equal((await bob.get('/api/containers/apps-bob')).status, 200, 'bob reaches his app host');
+  assert.equal((await bob.get('/api/servers/apps-bob/tools/pm2')).status, 403, 'no root tools in managed hosting');
   assert.equal((await ana.get(`/api/apps/${id}`)).status, 403);
   assert.equal((await bob.del('/api/containers/apps-bob', { confirm: 'apps-bob', stopFirst: true })).status, 403, 'not deletable as a server');
   assert.equal((await bob.post('/api/apps', { container: 'apps-bob', name: 'x2', type: 'node', repoUrl: 'https://github.com/x/y.git' })).status, 400);
-  const w = (await bob.get('/api/billing/me')).data.wallet;
-  assert.ok(w.resources.some((x) => x.kind === 'app' && x.name === 'apps-bob/shop' && x.priceDay === 1200));
+  let w = (await bob.get('/api/billing/me')).data.wallet;
+  assert.ok(w.resources.some((x) => x.kind === 'app' && x.name === 'apps-bob' && x.priceDay === 1200), 'one charge for the package');
+  const st = await bob.get(`/api/apps/${id}/stats`);
+  assert.equal(st.status, 200);
 
-  // a second app grows the host; the port moves on if taken
-  const r2 = await bob.post('/api/apps', { ...body, name: 'blog' });
-  assert.equal(r2.status, 201);
+  // second app fits the package (port moves on), a third does not
+  const r2 = await bob.post('/api/apps', { ...body, name: 'blog', planId: undefined });
+  assert.equal(r2.status, 201, JSON.stringify(r2.data));
   assert.equal(r2.data.app.port, 3001);
   await until(async () => (await bob.get(`/api/apps/${r2.data.app.id}`)).data.app.status === 'running', 30000);
+  const r3 = await bob.post('/api/apps', { ...body, name: 'wiki' });
+  assert.equal(r3.status, 409);
+  assert.match(r3.data.error, /allows 2 apps/);
+  w = (await bob.get('/api/billing/me')).data.wallet;
+  assert.equal(w.resources.filter((x) => x.kind === 'app').length, 1, 'still one package charge for two apps');
+
+  // upgrade: price + host size follow
+  assert.equal((await bob.put('/api/hosting', { planId: big.id })).status, 200);
   await until(() => lxd.calls.some((c) => c.method === 'PUT' && c.path === '/1.0/instances/apps-bob' && c.body.config['limits.memory'] === '1024MiB'));
+  assert.equal((await bob.get('/api/billing/me')).data.wallet.resources.find((x) => x.kind === 'app').priceDay, 3000);
+  assert.equal((await bob.put('/api/hosting', { planId: p.data.plan.id })).status, 400, 'no smaller disk');
 
   assert.equal((await bob.del(`/api/apps/${r2.data.app.id}`, { confirm: 'blog' })).status, 200);
-  assert.equal((await bob.del(`/api/apps/${id}`, { confirm: 'shop' })).status, 200);
+  assert.ok(!one("SELECT ended_at FROM billed_resources WHERE kind = 'app' AND name = 'apps-bob' ORDER BY id DESC").ended_at, 'package goes on while an app is left');
+  const last = await bob.del(`/api/apps/${id}`, { confirm: 'shop' });
+  assert.equal(last.status, 200);
+  assert.match(last.data.note, /package ended/);
   await until(async () => (await sup.get('/api/containers/apps-bob')).status === 404, 20000);
-  assert.ok(one("SELECT ended_at FROM billed_resources WHERE name = 'apps-bob/shop'").ended_at);
+  assert.ok(one("SELECT ended_at FROM billed_resources WHERE kind = 'app' AND name = 'apps-bob' ORDER BY id DESC").ended_at);
+  assert.equal((await bob.get('/api/hosting')).data.package, null);
 });
 
 test('starter plans and the automatic app subdomain', async () => {
   assert.equal((await ana.post('/api/billing/plans/starter')).status, 403);
   const s = await sup.post('/api/billing/plans/starter');
   assert.equal(s.status, 200);
-  assert.ok(s.data.created.includes('App Mini') && s.data.created.includes('DB Mini') && s.data.created.includes('Server Small'));
+  assert.ok(s.data.created.includes('Starter') && s.data.created.includes('Business') && s.data.created.includes('DB Mini') && s.data.created.includes('Server Small'));
   assert.equal((await sup.post('/api/billing/plans/starter')).data.created.length, 0, 'idempotent');
-  const mini = s.data.plans.find((p) => p.name === 'App Mini');
+  const mini = s.data.plans.find((p) => p.name === 'Starter');
+  assert.equal(mini.maxApps, 1);
   await sup.post(`/api/billing/users/${ids.ana}/tx`, { amount: 100000 });
   const r = await ana.post('/api/apps', { target: 'main', planId: mini.id, name: 'Shop_1'.toLowerCase().replace('_', '-'), type: 'node', repoUrl: 'https://github.com/x/shop.git' });
   assert.equal(r.status, 201, JSON.stringify(r.data));
-  assert.equal(r.data.app.priceDay, 1500);
+  assert.equal(r.data.app.planName, 'Starter');
   const done = await until(async () => { const d = (await ana.get(`/api/apps/${r.data.app.id}`)).data.app; return d.status === 'running' && d.domains.length ? d : null; }, 30000);
   assert.equal(done.domains[0].hostname, 'shop-1-ana.gyannportal.com');
   assert.equal(done.domains[0].status, 'manual', 'no Cloudflare API in tests: route is shown for the admin');
@@ -341,4 +364,19 @@ test('public sign-up, landing page and settings', async () => {
   assert.equal((await new Client().post('/api/register', { ...good, username: 'hari', email: 'hari@example.com' })).status, 403);
   const audit = (await sup.get('/api/audit?action=user_register')).data.entries;
   assert.ok(audit.some((e) => e.username === 'sita' && e.result === 'success'));
+});
+
+test('dashboards: platform totals for admins, own totals + wallet for customers, per-customer cloud view', async () => {
+  const a = (await sup.get('/api/overview')).data.cloud;
+  assert.ok(a.revenue.month > 0, 'charges this month count as revenue');
+  assert.ok(a.wallets.customers >= 2);
+  assert.equal(typeof a.packages, 'number');
+  assert.ok('main' in a.apps && 'vps' in a.apps && 'total' in a.databases);
+  const u = (await ana.get('/api/overview')).data;
+  assert.equal(u.cloud.revenue, undefined, 'customers never see platform money');
+  assert.equal(typeof u.wallet.balance, 'number');
+  assert.equal((await ana.get(`/api/admin/users/${ids.ana}/cloud`)).status, 403);
+  const c = (await sup.get(`/api/admin/users/${ids.ana}/cloud`)).data;
+  assert.ok(Array.isArray(c.apps) && Array.isArray(c.databases) && Array.isArray(c.vps));
+  assert.equal(c.wallet.username, 'ana');
 });

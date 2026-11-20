@@ -27,46 +27,51 @@ import Databases from './pages/Databases.jsx';
 import ContainerTools from './pages/ContainerTools.jsx';
 import SecurityCenter from './pages/SecurityCenter.jsx';
 import Billing, { Wallet } from './pages/Billing.jsx';
+import MyServers from './pages/MyServers.jsx';
+import Support from './pages/Support.jsx';
 
 const ConsolePage = lazy(() => import('./pages/Console.jsx'));
 
 const TerminalPage = lazy(() => import('./pages/TerminalPage.jsx'));
 
+// Admin: the platform first (customers, money), then infrastructure and tools
 const ADMIN_NAV = [
   ['Overview', [
     ['overview', 'Dashboard', 'dashboard'],
     ['compare', 'Server comparison', 'chart'],
   ]],
-  ['VPS Fleet', [
-    ['fleet', 'All servers', 'server'],
-    ['console', 'SSH console / host terminal', 'terminal'],
-    ['netdiag', 'Network diagnostics', 'network'],
-    ['uptime', 'Uptime', 'activity'],
+  ['Customers', [
+    ['users', 'Users', 'users'],
+    ['apps', 'Applications', 'app'],
+    ['databases', 'Databases', 'disk'],
+    ['my-servers', 'Customer VPS', 'network'],
+    ['domains', 'Domains', 'globe'],
+  ]],
+  ['Billing', [
+    ['plans', 'Plans & pricing', 'chart'],
+    ['billing', 'Wallets & transactions', 'storage'],
   ]],
   ['Infrastructure', [
-    ['servers', 'LXD servers', 'storage'],
+    ['fleet', 'Servers (fleet)', 'server'],
+    ['servers', 'LXD containers', 'storage'],
     ['monitoring', 'Monitoring', 'chart'],
-    ['network', 'Network', 'network'],
+    ['uptime', 'Uptime', 'activity'],
     ['backups', 'Backups', 'backup'],
+    ['network', 'Network', 'network'],
   ]],
-  ['Applications', [
+  ['Tools', [
     ['replicas', 'Replicas & LB', 'app'],
     ['pm2', 'PM2 Manager', 'cpu'],
     ['docker', 'Docker Manager', 'storage'],
-    ['databases', 'Databases', 'disk'],
-  ]],
-  ['Cloud', [
-    ['users', 'Users', 'users'],
-    ['billing', 'Billing & plans', 'chart'],
-    ['apps', 'Container apps', 'app'],
     ['container-tools', 'Container tools', 'cpu'],
-    ['domains', 'Domains', 'globe'],
-    ['terminal', 'Terminal', 'terminal'],
+    ['console', 'SSH console / host terminal', 'terminal'],
+    ['terminal', 'Container terminal', 'terminal'],
+    ['netdiag', 'Network diagnostics', 'network'],
   ]],
   ['Administration', [
     ['security-center', 'Security center', 'shield'],
     ['audit', 'Audit log', 'audit'],
-    ['settings', 'Settings', 'settings'],
+    ['settings', 'System settings', 'settings'],
   ]],
   ['Account', [
     ['ssh-keys', 'SSH keys', 'key'],
@@ -74,29 +79,37 @@ const ADMIN_NAV = [
     ['security', 'Security', 'shield'],
   ]],
 ];
+// Customer: what they deploy, where, and what it costs
 const USER_NAV = [
   ['Cloud', [
     ['overview', 'Overview', 'dashboard'],
-    ['servers', 'My servers', 'server'],
     ['apps', 'Applications', 'app'],
+    ['databases', 'Databases', 'disk'],
+    ['my-servers', 'My VPS servers', 'network'],
+    ['servers', 'Cloud servers', 'server'],
+    ['domains', 'Domains', 'globe'],
+    ['backups', 'Backups', 'backup'],
+  ]],
+  ['Billing', [
+    ['wallet', 'Plans, billing & wallet', 'chart'],
+    ['monitoring', 'Usage', 'activity'],
+  ]],
+  ['Server tools', [
+    ['terminal', 'Terminal', 'terminal'],
     ['pm2', 'PM2 Manager', 'cpu'],
     ['docker', 'Docker Manager', 'storage'],
-    ['databases', 'Databases in my servers', 'disk'],
-    ['cloud-databases', 'Managed databases', 'disk'],
-    ['terminal', 'Terminal', 'terminal'],
+    ['server-databases', 'Databases in my servers', 'disk'],
     ['storage', 'Storage', 'storage'],
-    ['backups', 'Backups', 'backup'],
     ['network', 'Network', 'network'],
-    ['monitoring', 'Monitoring', 'chart'],
   ]],
   ['Account', [
-    ['wallet', 'Wallet & billing', 'chart'],
     ['ssh-keys', 'SSH keys', 'key'],
-    ['account', 'Account settings', 'user'],
+    ['account', 'Settings', 'user'],
     ['security', 'Security', 'shield'],
+    ['support', 'Support', 'info'],
   ]],
 ];
-const ALIASES = { containers: 'servers', 'audit-log': 'audit', 'load-balancer': 'replicas', nodes: 'fleet' };
+const ALIASES = { containers: 'servers', 'audit-log': 'audit', 'load-balancer': 'replicas', nodes: 'fleet', 'cloud-databases': 'databases' };
 
 function ThemeToggle() {
   const [pref, setPref] = useState(getThemePref);
@@ -119,11 +132,20 @@ function Shell() {
   const [alerts, setAlerts] = useState([]);
   const [cmdk, setCmdk] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
+  const [wallet, setWallet] = useState(null);
   const route = useRoute();
 
   useEffect(() => {
     api('/api/me').then((m) => { setCsrf(m.csrf); setMe(m); }).catch(() => {});
   }, []);
+  // Customers: wallet state for the low-balance / grace / stopped banner (refreshed every 5 minutes)
+  useEffect(() => {
+    if (!me || me.isAdmin) return undefined;
+    const load = () => api('/api/billing/me').then((d) => setWallet(d.wallet || null)).catch(() => {});
+    load();
+    const t = setInterval(load, 5 * 60_000);
+    return () => clearInterval(t);
+  }, [me]);
 
   useEffect(() => {
     if (!me) return undefined;
@@ -219,11 +241,14 @@ function Shell() {
     case 'compare': body = <Compare />; break;
     case 'pm2': body = me.isAdmin ? <Pm2Page /> : <ContainerTools kind="pm2" name={route[1]} />; break;
     case 'docker': body = me.isAdmin ? <DockerPage /> : <ContainerTools kind="docker" name={route[1]} />; break;
-    case 'databases': body = me.isAdmin ? <Databases /> : <ContainerTools kind="databases" name={route[1]} />; break;
+    case 'databases': body = <Databases />; break;
+    case 'server-databases': body = <ContainerTools kind="databases" base="server-databases" name={route[1]} />; break;
     case 'container-tools': body = <ContainerTools admin kind={route[1] || 'pm2'} base={`container-tools/${route[1] || 'pm2'}`} name={route[2]} />; break;
     case 'billing': body = <Billing tab={route[1] || 'wallets'} />; break;
+    case 'plans': body = <Billing tab="plans" />; break;
+    case 'support': body = <Support />; break;
     case 'wallet': body = <Wallet />; break;
-    case 'cloud-databases': body = <Databases />; break;
+    case 'my-servers': body = <MyServers />; break;
     case 'security-center': body = <SecurityCenter tab={route[1] || 'check'} />; break;
     case 'monitoring': body = <Monitoring />; break;
     case 'settings': body = <Settings />; break;
@@ -287,6 +312,9 @@ function Shell() {
             </div>
           </header>
           {status === 'offline' && <div className="offline">Lost connection to the panel. Reconnecting automatically…</div>}
+          {wallet?.state === 'stopped' && <div className="billbar billbar--bad">Your services are stopped because your wallet is empty. Nothing was deleted; they can start again after a top-up.<a href={href('wallet')}>Wallet</a></div>}
+          {wallet?.state === 'grace' && <div className="billbar billbar--bad">Your wallet is empty. Services stop on {new Date(wallet.graceEndsAt).toLocaleString()} unless it is topped up.<a href={href('wallet')}>Wallet</a></div>}
+          {wallet?.state === 'ok' && wallet.low && <div className="billbar billbar--warn">Low balance: about {wallet.daysLeft} day(s) left at your current usage.<a href={href('wallet')}>Wallet</a></div>}
           <main className="content">{body}</main>
         </div>
       </div>

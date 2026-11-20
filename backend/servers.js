@@ -375,7 +375,8 @@ export function createServers({ io, containers, allocator, stacks = null, billin
         containerMeta.remove(name);
       })();
       billing?.end('server', name, req.session.username);
-      billing?.endPrefix('app', `${name}/`, req.session.username); // apps on a deleted app host
+      billing?.end('app', name, req.session.username); // hosting package of a deleted app host
+      db.prepare("UPDATE users SET hosting_plan_id = NULL WHERE id IN (SELECT user_id FROM billed_resources WHERE kind = 'app' AND name = ?)").run(name);
       return `Deleted ${name}`;
     }));
   }));
@@ -599,6 +600,7 @@ export function createServers({ io, containers, allocator, stacks = null, billin
     if (b.signup_enabled !== undefined) settings.set('signup_enabled', b.signup_enabled === true, req.session.username);
     if (b.signup_requires_approval !== undefined) settings.set('signup_requires_approval', b.signup_requires_approval === true, req.session.username);
     num('signup_credit', 0, 1e9, true);
+    if (b.support_contact !== undefined) settings.set('support_contact', String(b.support_contact || '').replace(/[<>]/g, '').slice(0, 500), req.session.username);
     if (b.auto_app_domains !== undefined) settings.set('auto_app_domains', b.auto_app_domains === true, req.session.username);
     if (b.auto_app_domain_suffix !== undefined) {
       const sfx = String(b.auto_app_domain_suffix || '').trim().toLowerCase();

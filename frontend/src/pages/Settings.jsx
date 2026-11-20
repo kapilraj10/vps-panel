@@ -29,7 +29,7 @@ export default function Settings() {
       terminal_idle_minutes: Number(f.terminal_idle_minutes), terminal_max_minutes: Number(f.terminal_max_minutes),
       allowed_domain_suffixes: f.allowed_domain_suffixes.split(',').map((s) => s.trim()).filter(Boolean),
       auto_app_domains: f.auto_app_domains !== false, auto_app_domain_suffix: f.auto_app_domain_suffix || '',
-      signup_enabled: f.signup_enabled !== false, signup_requires_approval: !!f.signup_requires_approval, signup_credit: Number(f.signup_credit) || 0,
+      support_contact: f.support_contact || '', signup_enabled: f.signup_enabled !== false, signup_requires_approval: !!f.signup_requires_approval, signup_credit: Number(f.signup_credit) || 0,
     };
     if (await run(() => api('/api/settings', { method: 'PUT', body }), 'Settings saved')) alloc.reload();
   }
@@ -69,6 +69,7 @@ export default function Settings() {
               <h3>Public sign-up</h3>
               <label className="check"><input type="checkbox" checked={f.signup_enabled !== false} onChange={(e) => setF({ ...f, signup_enabled: e.target.checked })} /> Anyone can create an account on the landing page (/register)</label>
               <label className="check"><input type="checkbox" checked={!!f.signup_requires_approval} onChange={(e) => setF({ ...f, signup_requires_approval: e.target.checked })} /> New accounts wait until an admin activates them (Users page)</label>
+              <Field label="Support contact" hint="Shown to customers on the Support page and the landing page: email, phone, hours" wide><textarea className="textarea" rows={2} maxLength={500} value={f.support_contact || ''} onChange={set('support_contact')} placeholder="support@sampannatech.online · +977 98XXXXXXXX · Sun–Fri 9–6" /></Field>
               <Field label="Welcome credit for new accounts (NPR)" hint="0 = none. Lets people try an app before paying."><input type="number" min={0} step="1" value={(f.signup_credit || 0) / 100} onChange={(e) => setF({ ...f, signup_credit: Math.round(Number(e.target.value) * 100) })} /></Field>
             </div>
           </Card>

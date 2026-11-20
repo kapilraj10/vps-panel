@@ -3,6 +3,13 @@
 // users only ever see their public URL. SSL is terminated by Cloudflare; the panel checks the edge certificate.
 import express from 'express';
 import tls from 'node:tls';
+import crypto from 'node:crypto';
+import dnsp from 'node:dns/promises';
+
+// Resolver for domain checks; DNS_SERVER=ip:port points it elsewhere (tests, or a resolver that is not cached)
+const resolver = new dnsp.Resolver({ timeout: 5000, tries: 2 });
+if (process.env.DNS_SERVER) resolver.setServers([process.env.DNS_SERVER]);
+import { customerServers } from './myservers.js';
 import { db, audit, settings } from './db.js';
 import { clientIp, isAdmin, ownsContainer, requireAdmin } from './auth.js';
 import { cfConfigured, addRoute, removeRoute, tunnelRules, tunnelTarget } from './cloudflare.js';
@@ -44,11 +51,29 @@ export function createDomains({ containers, monitoring }) {
   const router = express.Router();
   const who = (req) => ({ username: req.session.username, ip: clientIp(req) });
 
+  // Custom domain = not under one of the platform's suffixes: the owner proves control with a TXT record first
+  const suffixOf = (hostname) => (settings.get('allowed_domain_suffixes') || []).find((sfx) => hostname === sfx || hostname.endsWith(`.${sfx}`)) || null;
+  const isCustom = (hostname) => !suffixOf(hostname);
+  const vpsOf = (d) => (/^vps-\d+$/.test(d.container) ? customerServers.get(Number(d.container.slice(4))) : null);
+  function instructions(d) {
+    const out = [];
+    if (d.verify_token && !d.verified_at) out.push({ type: 'TXT', name: `_sampanna-verify.${d.hostname}`, value: `sampanna-verify=${d.verify_token}`, why: 'Proves you control the domain' });
+    const vps = vpsOf(d);
+    if (vps) {
+      out.push({ type: 'A', name: d.hostname, value: vps.host, why: `Points the domain at your VPS ${vps.name}. Serve port ${d.port} there (e.g. Nginx + Let's Encrypt: certbot --nginx -d ${d.hostname})` });
+    } else if (isCustom(d.hostname)) {
+      out.push({ type: 'CNAME', name: d.hostname, value: cfConfigured() ? tunnelTarget() : '(the administrator gives you the target)', why: 'Sends traffic to Sampanna Cloud. Works when the domain is on Cloudflare; SSL is by Cloudflare' });
+    }
+    return out;
+  }
+
   const view = (d, admin) => {
     const out = {
       id: d.id, hostname: d.hostname, url: `https://${d.hostname}`, container: d.container, app: d.app_name || null, appId: d.app_id,
       port: d.port, status: d.status, error: d.error, owner: d.owner, ssl: { status: d.ssl_status, issuer: d.ssl_issuer, expiresAt: d.ssl_expires_at, checkedAt: d.ssl_checked_at },
       createdAt: d.created_at, approvedBy: d.approved_by, routeSynced: !!d.route_synced,
+      custom: isCustom(d.hostname), verified: !d.verify_token || !!d.verified_at, verifiedAt: d.verified_at || null,
+      onVps: !!vpsOf(d), dns: instructions(d),
     };
     if (admin) out.target = targetFor(d);
     return out;
@@ -62,7 +87,7 @@ export function createDomains({ containers, monitoring }) {
   function mine(req) {
     const d = /^\d+$/.test(req.params.id) ? domainsDb.get(Number(req.params.id)) : null;
     if (!d) throw notFound('No such domain');
-    if (!ownsContainer(req.session, d.container)) throw forbidden('You can only manage your own domains');
+    if (!ownsContainer(req.session, d.container) && d.user_id !== req.session.id) throw forbidden('You can only manage your own domains');
     return d;
   }
 
@@ -92,7 +117,7 @@ export function createDomains({ containers, monitoring }) {
   // ---------- routes ----------
   router.get('/domains', (req, res) => {
     const admin = isAdmin(req.session);
-    const list = domainsDb.all().filter((d) => ownsContainer(req.session, d.container));
+    const list = domainsDb.all().filter((d) => ownsContainer(req.session, d.container) || d.user_id === req.session.id);
     res.set('Cache-Control', 'no-store');
     res.json({
       domains: list.map((d) => view(d, admin)),
@@ -105,20 +130,21 @@ export function createDomains({ containers, monitoring }) {
     const b = req.body ?? {};
     const hostname = typeof b.hostname === 'string' ? b.hostname.trim().toLowerCase().replace(/\.$/, '') : '';
     if (!HOST_RE.test(hostname)) throw bad('Enter a hostname like app.example.com');
-    const container = typeof b.container === 'string' ? b.container : '';
-    if (!ownsContainer(req.session, container) || !containers.exists(container)) throw forbidden('Pick one of your servers');
     const admin = isAdmin(req.session);
+    // Either for an app (any target, incl. the customer's VPS) or for a port of one of their servers
+    const forApp = b.appId ? db.prepare('SELECT id, port, container, user_id, target FROM apps WHERE id = ?').get(Number(b.appId)) : null;
+    if (b.appId && (!forApp || (!ownsContainer(req.session, forApp.container) && forApp.user_id !== req.session.id))) throw forbidden('Pick one of your apps');
+    const container = forApp ? forApp.container : typeof b.container === 'string' ? b.container : '';
+    if (!forApp && (!ownsContainer(req.session, container) || !containers.exists(container))) throw forbidden('Pick one of your servers');
     const suffixes = settings.get('allowed_domain_suffixes') || [];
     const sub = suffixes.find((s) => hostname.endsWith(`.${s}`));
     if (!admin && sub && RESERVED.includes(hostname.slice(0, -(sub.length + 1)).split('.').pop())) throw bad('That name is reserved');
     if (!admin && suffixes.includes(hostname)) throw bad('That is the main domain; pick a subdomain');
     let appId = null;
     let port;
-    if (b.appId) {
-      const a = db.prepare('SELECT id, port, container FROM apps WHERE id = ?').get(Number(b.appId));
-      if (!a || a.container !== container) throw bad('That app is not on this server');
-      appId = a.id;
-      port = a.port;
+    if (forApp) {
+      appId = forApp.id;
+      port = forApp.port;
     } else {
       port = int(b.port, { min: 1, max: 65535, name: 'Port' });
     }
@@ -128,12 +154,15 @@ export function createDomains({ containers, monitoring }) {
       if (rules?.some((r) => r.hostname?.toLowerCase() === hostname)) throw conflict(`${hostname} is already routed by the tunnel`);
     }
     const now = Date.now();
-    const ownerId = admin ? (db.prepare('SELECT user_id FROM user_containers WHERE container = ? LIMIT 1').get(container)?.user_id ?? req.session.id) : req.session.id;
-    const id = Number(db.prepare(`INSERT INTO domains (hostname, user_id, container, app_id, port, status, requested_by, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).run(hostname, ownerId, container, appId, port, req.session.username, now, now).lastInsertRowid);
+    const ownerId = forApp ? forApp.user_id : admin ? (db.prepare('SELECT user_id FROM user_containers WHERE container = ? LIMIT 1').get(container)?.user_id ?? req.session.id) : req.session.id;
+    // Customers prove control of a custom domain first; platform subdomains and admins skip it
+    const token = !admin && isCustom(hostname) ? crypto.randomBytes(12).toString('hex') : null;
+    const onVps = /^vps-\d+$/.test(container);
+    const id = Number(db.prepare(`INSERT INTO domains (hostname, user_id, container, app_id, port, status, requested_by, created_at, updated_at, verify_token)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(hostname, ownerId, container, appId, port, token ? 'unverified' : onVps ? 'dns' : 'pending', req.session.username, now, now, token).lastInsertRowid);
     audit.log({ ...who(req), action: 'domain_request', target: hostname, result: 'success', detail: `${container}:${port}` });
     let d = domainsDb.get(id);
-    if (admin) {
+    if (admin && !onVps) {
       try {
         await sync(d);
         domainsDb.set(id, { approved_by: req.session.username });
@@ -147,6 +176,8 @@ export function createDomains({ containers, monitoring }) {
 
   router.post('/domains/:id/approve', requireAdmin, wrap(async (req, res) => {
     const d = mine(req);
+    if (/^vps-\d+$/.test(d.container)) throw conflict('This domain points at the customer\'s own VPS; there is nothing to route here');
+    if (d.verify_token && !d.verified_at) throw conflict('The owner has not verified this domain yet (TXT record)');
     if (!['pending', 'error', 'manual', 'rejected'].includes(d.status)) throw conflict(`Domain is ${d.status}`);
     try {
       const r = await sync(d);
@@ -157,6 +188,28 @@ export function createDomains({ containers, monitoring }) {
       audit.log({ ...who(req), action: 'domain_approve', target: d.hostname, result: 'failure', detail: err.message });
     }
     res.json({ domain: view(domainsDb.all().find((x) => x.id === d.id), true) });
+  }));
+
+  // Check the DNS records the owner was asked to add. TXT for ownership; for a VPS app also the A record.
+  router.post('/domains/:id/verify', wrap(async (req, res) => {
+    const d = mine(req);
+    const txt = d.verify_token ? (await resolver.resolveTxt(`_sampanna-verify.${d.hostname}`).catch(() => [])).map((r) => r.join('')) : [];
+    const ok = !d.verify_token || d.verified_at || txt.includes(`sampanna-verify=${d.verify_token}`);
+    const fields = {};
+    if (ok && d.verify_token && !d.verified_at) fields.verified_at = Date.now();
+    const vps = vpsOf(d);
+    let pointsHere = null;
+    if (vps) {
+      const want = vps.host;
+      const got = await resolver.resolve4(d.hostname).catch(() => []);
+      pointsHere = got.includes(want) || (!/^[\d.]+$/.test(want) && (await resolver.resolve4(want).catch(() => [])).some((ip) => got.includes(ip)));
+    }
+    if (ok) fields.status = vps ? (pointsHere ? 'active' : 'dns') : d.status === 'unverified' ? 'pending' : d.status;
+    if (Object.keys(fields).length) domainsDb.set(d.id, fields);
+    audit.log({ ...who(req), action: 'domain_verify', target: d.hostname, result: ok ? 'success' : 'failure', detail: ok ? (vps ? `A record ${pointsHere ? 'ok' : 'not yet pointing at the VPS'}` : 'TXT ok') : `TXT not found (${txt.length} TXT record(s))` });
+    const fresh = domainsDb.all().find((x) => x.id === d.id);
+    res.json({ verified: !!ok, pointsHere, domain: view(fresh, isAdmin(req.session)),
+      message: ok ? (vps ? (pointsHere ? 'Verified and pointing at your VPS.' : 'Verified. Now add the A record (DNS changes can take a few minutes).') : 'Verified. An administrator connects it next.') : 'The TXT record was not found yet. DNS changes can take a few minutes.' });
   }));
 
   router.post('/domains/:id/reject', requireAdmin, wrap(async (req, res) => {
@@ -228,7 +281,7 @@ export function createDomains({ containers, monitoring }) {
   async function autoForApp(appId) {
     if (settings.get('auto_app_domains') === false) return null;
     const a = db.prepare('SELECT a.*, u.username FROM apps a JOIN users u ON u.id = a.user_id WHERE a.id = ?').get(appId);
-    if (!a) return null;
+    if (!a || a.target === 'vps') return null; // apps on a customer's VPS are reached at their own address
     if (db.prepare("SELECT 1 FROM domains WHERE app_id = ? AND status NOT IN ('removed', 'rejected')").get(a.id)) return null;
     const suffix = (settings.get('auto_app_domain_suffix') || (settings.get('allowed_domain_suffixes') || [])[0] || '').toLowerCase();
     if (!suffix || !HOST_RE.test(`x.${suffix}`)) return null;

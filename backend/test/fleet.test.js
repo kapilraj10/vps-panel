@@ -132,7 +132,7 @@ before(async () => {
     cwd: path.join(here, '..'),
     env: {
       ...process.env, PORT: String(PORT), HOST: '127.0.0.1', DB_PATH: DB, LXD_SOCKET: path.join(tmp, 'lxd.sock'), SESSION_SECRET: 'z'.repeat(64),
-      COOKIE_SECURE: 'false', BACKUP_HELPER: '/nonexistent', BACKUP_STATE_DIR: path.join(tmp, 'state'), BACKUP_DISK_CHECK: 'off', MONITOR_SERVICES: '',
+      COOKIE_SECURE: 'false', GIT_CHECK: 'off', BACKUP_HELPER: '/nonexistent', BACKUP_STATE_DIR: path.join(tmp, 'state'), BACKUP_DISK_CHECK: 'off', MONITOR_SERVICES: '',
       DOCKER_SOCKET: path.join(tmp, 'nodocker.sock'), NODE_METRIC_BUCKET_MS: '2000', NODE_PROBE_MS: '1000',
     },
   });

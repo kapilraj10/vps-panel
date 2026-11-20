@@ -91,7 +91,7 @@ before(async () => {
     cwd: path.join(here, '..'),
     env: {
       ...process.env, PORT: String(PORT), HOST: '127.0.0.1', DB_PATH: DB, LXD_SOCKET: path.join(tmp, 'lxd.sock'), SESSION_SECRET: 'y'.repeat(64),
-      COOKIE_SECURE: 'false', BACKUP_HELPER: '/nonexistent', BACKUP_STATE_DIR: path.join(tmp, 'state'), BACKUP_DISK_CHECK: 'off', MONITOR_SERVICES: '',
+      COOKIE_SECURE: 'false', GIT_CHECK: 'off', BACKUP_HELPER: '/nonexistent', BACKUP_STATE_DIR: path.join(tmp, 'state'), BACKUP_DISK_CHECK: 'off', MONITOR_SERVICES: '',
       PM2_BIN: `${node} ${path.join(here, 'fake-pm2.js')}`, FAKE_PM2_STATE: PM2_STATE, FAKE_FLAGS: FLAGS,
       DOCKER_SOCKET: path.join(tmp, 'docker.sock'),
       NGINX_TEST: `${node} ${path.join(here, 'fake-nginx.js')} test`, NGINX_RELOAD: `${node} ${path.join(here, 'fake-nginx.js')} reload`,
