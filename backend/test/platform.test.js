@@ -374,9 +374,11 @@ test('master setup: primary node in Kathmandu, panel key installed once, other k
   assert.equal(r.data.node.public_ip, '127.0.0.1');
   assert.equal(r.data.ssh.ok, false, 'no sshd on port 1 here: reported, not thrown');
   const keys = fs.readFileSync(path.join(HOME, '.ssh', 'authorized_keys'), 'utf8');
-  const pub = (await sup.get('/api/ssh/public-key')).data.publicKey;
+  const pk = await sup.get('/api/ssh/public-key');
+  const pub = pk.data.publicKey;
   assert.ok(keys.startsWith('ssh-ed25519 AAAAexisting me@laptop\n'), 'existing keys untouched');
-  assert.ok(keys.includes(pub));
+  assert.equal(r.data.keyFile, path.join(HOME, '.ssh', 'authorized_keys'), 'written to the panel user\'s own home');
+  assert.ok(pub && keys.includes(pub), JSON.stringify({ publicKeyStatus: pk.status, publicKeyAnswer: pk.data, keyAdded: r.data.keyAdded, keys }));
   assert.equal(fs.statSync(path.join(HOME, '.ssh', 'authorized_keys')).mode & 0o777, 0o600);
   const again = await sup.post('/api/fleet/master/setup', { location: 'Kathmandu, Nepal' });
   assert.equal(again.data.keyAdded, false);
