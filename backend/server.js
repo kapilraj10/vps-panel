@@ -41,6 +41,7 @@ import { createMaster } from './master.js';
 import { createBilling } from './billing.js';
 import { createAppHost } from './apphost.js';
 import { createSignup } from './signup.js';
+import { createMyServers } from './myservers.js';
 import { changeState } from './lxd.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -503,6 +504,8 @@ app.use('/api', twoFactor.router);
 app.use('/api', master.router);
 app.use('/api/databases', databasesMod.router);
 app.use('/api', billing.router);
+const myServers = createMyServers({ io });
+app.use('/api', myServers.router);
 app.use('/api/security', securityMod.router);
 app.get('/api/terminals', requireAdmin, (_req, res) => res.json({ terminals: terminal.list() }));
 
@@ -577,6 +580,7 @@ if (!STAGING) {
   nodes.start();
   netTests.start();
   billing.startLoop();
+  myServers.start();
 }
 if (!STAGING && process.env.BACKUP_DISK_CHECK !== 'off') {
   const diskLoop = () => checkBackupDisk().finally(() => setTimeout(diskLoop, BACKUP_DISK_CHECK_MS).unref());

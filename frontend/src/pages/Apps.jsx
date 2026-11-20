@@ -8,18 +8,19 @@ import { fmtMoney } from './Billing.jsx';
 import { UserCreateServer } from './Servers.jsx';
 
 const STATUS_TONE = { running: 'good', deploying: 'warn', provisioning: 'warn', failed: 'bad', stopped: 'neutral', new: 'neutral' };
-const where = (a) => (a.target === 'main' ? 'Main server' : a.container);
-const priceText = (a) => (a.target === 'main' ? (a.planName ? `in your ${a.planName} package` : 'hosting package') : 'included in the server');
+const where = (a) => (a.target === 'main' ? 'Main server' : a.target === 'vps' ? `My VPS: ${a.serverName}` : a.container);
+const priceText = (a) => (a.target === 'main' ? (a.planName ? `in your ${a.planName} package` : 'hosting package') : a.target === 'vps' ? 'your own server' : 'included in the server');
 const memText = (b) => (b >= 1073741824 ? `${(b / 1073741824).toFixed(2)} GB` : `${Math.round(b / 1048576)} MB`);
 
 // Where to deploy: 1) one of my servers, 2) the main server (no VPS needed, the panel sets it up), 3) a new server
-function TargetPicker({ value, onChange, hasServers, hosting, planId, onPlan, onNewServer }) {
+function TargetPicker({ value, onChange, hasServers, hasVps, hosting, planId, onPlan, onNewServer }) {
   const pkg = hosting?.package;
   const plans = hosting?.packages;
   const opts = [
-    ['server', 'My server', hasServers ? 'Deploy inside one of your VPS servers' : 'You have no server yet', !hasServers],
-    ['main', 'Main server (direct)', 'No VPS needed. The panel runs it for you on the main server.', false],
-    ['new', 'New server', 'Create a VPS from a plan first, then deploy into it', false],
+    ['main', 'Main server (managed)', 'No VPS needed. Sampanna Cloud runs it for you, with a free subdomain.', false],
+    ['vps', 'My VPS', hasVps ? 'Your own server connected over SSH' : 'Connect your server first (My VPS servers)', !hasVps],
+    ['server', 'My cloud server', hasServers ? 'A server you rent from Sampanna Cloud' : 'You have no cloud server', !hasServers],
+    ['new', 'New server', 'Rent a cloud server from a plan first', false],
   ];
   return (
     <>
@@ -86,6 +87,8 @@ function AppForm({ open, onClose, app, onSaved }) {
   const servers = Object.values(cts).filter((c) => me.isAdmin || me.containers.includes(c.name)).map((c) => c.name)
     .filter((n) => !/^apps-/.test(n) || me.isAdmin).sort();
   const hosting = useApi(open && !app ? '/api/hosting' : null);
+  const myVps = useApi(open && !app && !me.isAdmin ? '/api/my-servers' : null);
+  const vpsList = myVps.data?.servers || [];
   const [newServer, setNewServer] = useState(false);
   useEffect(() => {
     if (!open) return;
@@ -93,7 +96,7 @@ function AppForm({ open, onClose, app, onSaved }) {
       setF({ ...app, gitToken: '' });
       api(`/api/apps/${app.id}/env`).then((d) => setEnvText(Object.entries(d.env).map(([k, v]) => `${k}=${v}`).join('\n'))).catch(() => setEnvText(''));
     } else {
-      setF({ target: servers.length ? 'server' : 'main', planId: '', container: servers[0] || '', name: '', type: 'node', repoUrl: '', branch: 'main', rootDir: '', outputDir: '', installCmd: '', buildCmd: '', startCmd: '', port: '', gitToken: '' });
+      setF({ target: 'main', serverId: '', planId: '', container: servers[0] || '', name: '', type: 'node', repoUrl: '', branch: 'main', rootDir: '', outputDir: '', installCmd: '', buildCmd: '', startCmd: '', port: '', gitToken: '' });
       setEnvText('');
     }
   }, [open, app?.id]);
@@ -111,7 +114,9 @@ function AppForm({ open, onClose, app, onSaved }) {
     if (!app && f.target === 'new') return;
     const body = { ...f, port: Number(f.port), env: envText, planId: f.planId ? Number(f.planId) : undefined };
     if (!f.gitToken) delete body.gitToken;
-    if (!app && f.target === 'main') delete body.container;
+    if (!app && f.target !== 'server') delete body.container;
+    if (!app && f.target === 'vps') body.serverId = Number(f.serverId || vpsList[0]?.id);
+    if (!app && f.target !== 'vps') delete body.serverId;
     const r = app ? await run(() => api(`/api/apps/${app.id}`, { method: 'PUT', body }), 'Application saved')
       : await run(() => api('/api/apps', { method: 'POST', body }), `Created ${f.name}`);
     if (r) { onSaved(r.app); onClose(); }
@@ -119,9 +124,10 @@ function AppForm({ open, onClose, app, onSaved }) {
   return (
     <Dialog open={open} title={app ? `Edit ${app.name}` : 'New application'} onClose={onClose} wide>
       <form className="form" onSubmit={submit}>
-        {!app && <TargetPicker value={f.target} onChange={(target) => setF({ ...f, target })} hasServers={servers.length > 0}
+        {!app && <TargetPicker value={f.target} onChange={(target) => setF({ ...f, target })} hasServers={servers.length > 0} hasVps={vpsList.length > 0}
           hosting={hosting.data} planId={f.planId} onPlan={(planId) => setF({ ...f, planId })} onNewServer={() => setNewServer(true)} />}
         <div className="fgrid">
+          {!app && f.target === 'vps' && <Field label="Your VPS"><select required value={f.serverId || vpsList[0]?.id || ''} onChange={set('serverId')}>{vpsList.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.host}){s.status !== 'online' ? ` · ${s.status}` : ''}</option>)}</select></Field>}
           {!app && f.target === 'server' && <Field label="Server"><select required value={f.container} onChange={set('container')}>{servers.map((s) => <option key={s}>{s}</option>)}</select></Field>}
           {!app && <Field label="App name" hint="Also the PM2 process name"><input required value={f.name} onChange={(e) => setF({ ...f, name: e.target.value.toLowerCase() })} pattern="[a-z][a-z0-9\-]{1,30}[a-z0-9]" /></Field>}
           {!app && <Field label="Type"><select value={f.type} onChange={set('type')}>{(types.data?.types || []).map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}</select></Field>}
@@ -175,7 +181,7 @@ function AppDetail({ id }) {
   if (error) return <ErrorNote error={error} />;
   if (!data) return <SkeletonRows />;
   const a = data.app;
-  const serverUp = cts[a.container]?.status === 'Running';
+  const serverUp = a.target === 'vps' || cts[a.container]?.status === 'Running'; // VPS reachability shows on deploy
   const op = async (kind) => { setLiveLog(''); setTab('deploy'); await run(() => api(`/api/apps/${a.id}/${kind}`, { method: 'POST' })); reload(); };
   const showLogs = async () => { setTab('logs'); setLogs(null); const r = await run(() => api(`/api/apps/${a.id}/logs`)); setLogs(r ? r.text : ''); };
   const del = async () => {
@@ -198,6 +204,7 @@ function AppDetail({ id }) {
           </div>
         )} />
       {serverUp && <AppStats id={a.id} />}
+      {a.directUrl && <Note>On your VPS this app listens at <a href={a.directUrl} target="_blank" rel="noreferrer noopener">{a.directUrl}</a> (open the port in the server's firewall, or point your domain at it).</Note>}
       {!serverUp && a.status === 'provisioning' && <Note>Preparing the main server for this app. The first deploy starts by itself; watch the Deploy log.</Note>}
       {!serverUp && a.status !== 'provisioning' && <Note tone="warn">{where(a)} is not running. Start the server to deploy or control this app.</Note>}
       <div className="grid2">

@@ -8,6 +8,7 @@
 import { createInstance, changeState, updateInstance, deleteInstance, toMiB, toGiB } from './lxd.js';
 import { db, users, containerMeta, audit } from './db.js';
 import { plans } from './billing.js';
+import { DOCKER_LXD_CONFIG } from './stacks.js';
 
 export const HOST_IMAGE = 'ubuntu-24.04';
 export const MANAGED_BY = 'kapil-cloud'; // container_meta.created_by of app hosts (users cannot delete them as "their own")
@@ -121,5 +122,20 @@ export function createAppHost({ containers, allocator }) {
     return serial(host, async () => { if (containers.exists(host)) await resize(host, wanted(packageOf(user.id))); });
   }
 
-  return { ensure, release, checkRoom, applyPackage, packageOf, hostNameFor, isAppHost, toMiB, toGiB };
+  // Docker apps need nesting in the app host (unprivileged container + nesting, the LXD-recommended way to run Docker
+  // inside). Turned on the first time; the host restarts once for it.
+  function enableDocker(host, progress = () => {}) {
+    return serial(host, async () => {
+      let changed = false;
+      await updateInstance(host, (next) => {
+        for (const [k, v] of Object.entries(DOCKER_LXD_CONFIG)) if (next.config[k] !== v) { next.config[k] = v; changed = true; }
+      });
+      if (!changed) return;
+      progress('Turning on Docker support for your app host (one restart)');
+      await changeState(host, 'restart').catch(() => {});
+      await waitRunning(host);
+    });
+  }
+
+  return { ensure, release, checkRoom, applyPackage, enableDocker, packageOf, hostNameFor, isAppHost, toMiB, toGiB };
 }

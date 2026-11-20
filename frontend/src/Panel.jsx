@@ -27,6 +27,7 @@ import Databases from './pages/Databases.jsx';
 import ContainerTools from './pages/ContainerTools.jsx';
 import SecurityCenter from './pages/SecurityCenter.jsx';
 import Billing, { Wallet } from './pages/Billing.jsx';
+import MyServers from './pages/MyServers.jsx';
 
 const ConsolePage = lazy(() => import('./pages/Console.jsx'));
 
@@ -58,6 +59,7 @@ const ADMIN_NAV = [
   ['Cloud', [
     ['users', 'Users', 'users'],
     ['billing', 'Billing & plans', 'chart'],
+    ['my-servers', 'Customer VPS', 'network'],
     ['apps', 'Container apps', 'app'],
     ['container-tools', 'Container tools', 'cpu'],
     ['domains', 'Domains', 'globe'],
@@ -77,7 +79,8 @@ const ADMIN_NAV = [
 const USER_NAV = [
   ['Cloud', [
     ['overview', 'Overview', 'dashboard'],
-    ['servers', 'My servers', 'server'],
+    ['servers', 'My cloud servers', 'server'],
+    ['my-servers', 'My VPS servers', 'network'],
     ['apps', 'Applications', 'app'],
     ['pm2', 'PM2 Manager', 'cpu'],
     ['docker', 'Docker Manager', 'storage'],
@@ -223,6 +226,7 @@ function Shell() {
     case 'container-tools': body = <ContainerTools admin kind={route[1] || 'pm2'} base={`container-tools/${route[1] || 'pm2'}`} name={route[2]} />; break;
     case 'billing': body = <Billing tab={route[1] || 'wallets'} />; break;
     case 'wallet': body = <Wallet />; break;
+    case 'my-servers': body = <MyServers />; break;
     case 'cloud-databases': body = <Databases />; break;
     case 'security-center': body = <SecurityCenter tab={route[1] || 'check'} />; break;
     case 'monitoring': body = <Monitoring />; break;

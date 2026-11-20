@@ -228,7 +228,7 @@ export function createDomains({ containers, monitoring }) {
   async function autoForApp(appId) {
     if (settings.get('auto_app_domains') === false) return null;
     const a = db.prepare('SELECT a.*, u.username FROM apps a JOIN users u ON u.id = a.user_id WHERE a.id = ?').get(appId);
-    if (!a) return null;
+    if (!a || a.target === 'vps') return null; // apps on a customer's VPS are reached at their own address
     if (db.prepare("SELECT 1 FROM domains WHERE app_id = ? AND status NOT IN ('removed', 'rejected')").get(a.id)) return null;
     const suffix = (settings.get('auto_app_domain_suffix') || (settings.get('allowed_domain_suffixes') || [])[0] || '').toLowerCase();
     if (!suffix || !HOST_RE.test(`x.${suffix}`)) return null;
