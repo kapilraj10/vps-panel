@@ -121,3 +121,5 @@ apps, warm standby with automatic failover.
 | New PC joins as a server (LXD on the node, deploy targets) | ⬜ next phase |
 | Warm standby + automatic failover to the next server | ⬜ phase after that |
 | New application: 3 targets — My server / **Main server (direct, no VPS needed)** / New server | ✅ tested: main server = one panel-managed unprivileged LXD app host per user (`apps-<user>`, `backend/apphost.js`), sized by "app" plans, billed per app, deleted with the last app (migration 8) |
+| Applications have a price: "app" plans, price column on Applications, one-click **Add starter plans** (server / app / database) | ✅ tested |
+| Automatic subdomain `<app>-<user>.<suffix>` after an app's first good deploy (Settings → Automatic app domain); removed with the app; tunnel routes go before matching wildcards like `*.gyannportal.com` | ✅ tested (live route needs CF_API_TOKEN / CF_ACCOUNT_ID / CF_TUNNEL_ID in .env, else shown as a manual route) |
