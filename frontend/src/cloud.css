@@ -443,3 +443,5 @@ tr.click { cursor: pointer; }
 .billbar--warn { background: color-mix(in srgb, var(--warn) 18%, var(--surface)); }
 .billbar--bad { background: color-mix(in srgb, var(--alarm) 18%, var(--surface)); }
 .billbar a { margin-left: 8px; }
+.dnsrec { margin-top: 8px; display: grid; gap: 6px; }
+.dnsrec__row code { font-size: 0.8rem; word-break: break-all; }

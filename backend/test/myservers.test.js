@@ -12,6 +12,7 @@ import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import ssh2 from 'ssh2';
 import { startFakeLxd } from './fake-lxd.js';
+import { startFakeDns } from './fake-dns.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kapil-myservers-test-'));
@@ -26,6 +27,7 @@ const BIN = path.join(tmp, 'bin');
 const CALLS = path.join(tmp, 'calls.log');
 const REPO = path.join(tmp, 'repo');
 let lxd;
+let dns;
 let proc;
 let ssh;
 let logs = '';
@@ -122,12 +124,13 @@ before(async () => {
   for (const [u, role] of [['kapil', 'admin'], ['ana', 'user'], ['bob', 'user']]) d.prepare('INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, 1)').run(u, h, role);
   d.close();
   lxd = await startFakeLxd(path.join(tmp, 'lxd.sock'), { instances: {} });
+  dns = await startFakeDns({});
   proc = spawn(process.execPath, ['server.js'], {
     cwd: path.join(here, '..'),
     env: {
       ...process.env, HOME: tmp, PORT: String(PORT), HOST: '127.0.0.1', DB_PATH: DB, LXD_SOCKET: path.join(tmp, 'lxd.sock'), SESSION_SECRET: 'm'.repeat(64),
       COOKIE_SECURE: 'false', GIT_CHECK: 'off', BACKUP_HELPER: '/nonexistent', BACKUP_STATE_DIR: path.join(tmp, 'state'), BACKUP_DISK_CHECK: 'off', MONITOR_SERVICES: '',
-      DOCKER_SOCKET: path.join(tmp, 'docker.sock'), CUSTOMER_SSH_ALLOW_PRIVATE: '1',
+      DOCKER_SOCKET: path.join(tmp, 'docker.sock'), CUSTOMER_SSH_ALLOW_PRIVATE: '1', DNS_SERVER: `127.0.0.1:${dns.port}`,
     },
   });
   proc.stdout.on('data', (x) => { logs += x; });
@@ -140,6 +143,7 @@ after(async () => {
   proc?.kill('SIGTERM');
   await sleep(300);
   ssh?.close();
+  dns?.close();
   await lxd?.close();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -217,6 +221,30 @@ test('database on my VPS: docker run there, port on 127.0.0.1 of that server, no
   const d = await ana.del(`/api/databases/${ready.id}`, { confirm: 'anadb' });
   assert.equal(d.status, 200);
   assert.match(fs.readFileSync(CALLS, 'utf8'), /docker rm -f kdb-anadb/);
+});
+
+test('custom domain for a VPS app: TXT proves ownership, A record must point at the VPS, nothing routed by the panel', async () => {
+  const d = await ana.post('/api/domains', { hostname: 'shop.example.org', appId });
+  assert.equal(d.status, 201, JSON.stringify(d.data));
+  const dom = d.data.domain;
+  assert.equal(dom.status, 'unverified');
+  assert.equal(dom.onVps, true);
+  const txt = dom.dns.find((x) => x.type === 'TXT');
+  assert.equal(txt.name, '_sampanna-verify.shop.example.org');
+  assert.deepEqual(dom.dns.find((x) => x.type === 'A').value, '127.0.0.1');
+  assert.equal((await bob.post(`/api/domains/${dom.id}/verify`)).status, 403);
+  let v = await ana.post(`/api/domains/${dom.id}/verify`);
+  assert.equal(v.data.verified, false);
+  dns.records['_sampanna-verify.shop.example.org'] = { TXT: [txt.value] };
+  v = await ana.post(`/api/domains/${dom.id}/verify`);
+  assert.equal(v.data.verified, true);
+  assert.equal(v.data.domain.status, 'dns', 'verified, but the A record is not there yet');
+  dns.records['shop.example.org'] = { A: ['127.0.0.1'] };
+  v = await ana.post(`/api/domains/${dom.id}/verify`);
+  assert.equal(v.data.domain.status, 'active');
+  assert.equal(v.data.domain.verified, true);
+  assert.equal((await sup.post(`/api/domains/${dom.id}/approve`)).status, 409, 'nothing to route on a customer VPS');
+  assert.equal((await ana.del(`/api/domains/${dom.id}`, { confirm: 'shop.example.org' })).status, 200);
 });
 
 test('admin moves an app from the customer VPS to the main server and back', async () => {

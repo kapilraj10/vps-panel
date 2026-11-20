@@ -638,6 +638,14 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 10,
+    name: 'domains: ownership verification (TXT) for custom domains',
+    sql: `
+      ALTER TABLE domains ADD COLUMN verify_token TEXT;
+      ALTER TABLE domains ADD COLUMN verified_at INTEGER;
+    `,
+  },
 ];
 
 function migrate() {
