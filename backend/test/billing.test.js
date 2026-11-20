@@ -306,3 +306,39 @@ test('starter plans and the automatic app subdomain', async () => {
   await sup.put('/api/settings', { auto_app_domains: false });
   assert.equal((await sup.get('/api/settings')).data.settings.auto_app_domains, false);
 });
+
+test('public sign-up, landing page and settings', async () => {
+  const home = await fetch(`${BASE}/`, { redirect: 'manual' });
+  assert.equal(home.status, 200, 'logged-out visitors get the landing page, not a redirect');
+  const info = await (await fetch(`${BASE}/api/public/info`)).json();
+  assert.equal(info.name, 'Sampanna Cloud');
+  assert.ok(info.plans.some((p) => p.kind === 'app'));
+  assert.ok(!JSON.stringify(info).includes('password'));
+
+  const anon = new Client();
+  const good = { fullName: 'Sita Sharma', email: 'sita@example.com', username: 'sita', password: 'long-enough-pass' };
+  for (const [bad, code] of [[{ ...good, username: 'admin' }, 400], [{ ...good, email: 'nope' }, 400], [{ ...good, password: 'short' }, 400],
+    [{ ...good, password: 'sita-long-password' }, 400], [{ ...good, username: 'ana' }, 409], [{ ...good, website: 'http://spam' }, 400], [{ ...good, fullName: '' }, 400]]) {
+    assert.equal((await anon.post('/api/register', bad)).status, code, JSON.stringify(bad));
+  }
+  await sup.put('/api/settings', { signup_credit: 5000 });
+  const r = await anon.post('/api/register', good);
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  anon.csrf = (await anon.get('/api/me')).data.csrf;
+  const me = (await anon.get('/api/me')).data;
+  assert.equal(me.username, 'sita');
+  assert.equal(me.role, 'user', 'never an admin');
+  assert.equal((await anon.get('/api/billing/me')).data.wallet.balance, 5000, 'welcome credit');
+  assert.equal((await anon.get('/api/users')).status, 403);
+  assert.equal((await new Client().post('/api/register', { ...good, username: 'sita2' })).status, 409, 'email used once');
+
+  await sup.put('/api/settings', { signup_requires_approval: true, signup_credit: 0 });
+  const p = await new Client().post('/api/register', { ...good, username: 'ram', email: 'ram@example.com' });
+  assert.equal(p.data.pending, true);
+  assert.equal((await new Client().login('ram', good.password)).status, 403, 'suspended until approved');
+
+  await sup.put('/api/settings', { signup_enabled: false });
+  assert.equal((await new Client().post('/api/register', { ...good, username: 'hari', email: 'hari@example.com' })).status, 403);
+  const audit = (await sup.get('/api/audit?action=user_register')).data.entries;
+  assert.ok(audit.some((e) => e.username === 'sita' && e.result === 'success'));
+});

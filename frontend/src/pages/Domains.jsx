@@ -34,7 +34,7 @@ export default function Domains() {
   }
   const act = async (d, op, okText) => { if (await run(() => api(`/api/domains/${d.id}/${op}`, { method: 'POST' }), okText)) { reload(); tunnel.reload?.(); } };
   const remove = async (d) => {
-    const typed = await confirm({ title: `Remove ${d.hostname}?`, typed: d.hostname, danger: true, confirmLabel: 'Remove', body: d.routeSynced ? 'The tunnel route and its DNS record are removed. The site stops being reachable.' : 'The domain is removed from Kapil Cloud.' });
+    const typed = await confirm({ title: `Remove ${d.hostname}?`, typed: d.hostname, danger: true, confirmLabel: 'Remove', body: d.routeSynced ? 'The tunnel route and its DNS record are removed. The site stops being reachable.' : 'The domain is removed from Sampanna Cloud.' });
     if (typed && await run(() => api(`/api/domains/${d.id}`, { method: 'DELETE', body: { confirm: typed } }), `Removed ${d.hostname}`)) { reload(); tunnel.reload?.(); }
   };
 
@@ -87,12 +87,12 @@ export default function Domains() {
         ) : <Empty icon="globe" title="No domains yet">Add one above to give an app a public HTTPS address.</Empty>}
       </Card>
       {me.isAdmin && cf?.configured && (
-        <Card title="Tunnel routes" sub={`Everything the Cloudflare Tunnel routes. Kapil Cloud only changes rows marked managed. CNAME target: ${cf.tunnelTarget}`} pad={false}>
+        <Card title="Tunnel routes" sub={`Everything the Cloudflare Tunnel routes. Sampanna Cloud only changes rows marked managed. CNAME target: ${cf.tunnelTarget}`} pad={false}>
           {tunnel.error && <ErrorNote error={tunnel.error} />}
           {!tunnel.data ? <div className="pad"><SkeletonRows /></div> : (
             <div className="table-wrap"><table className="table">
               <thead><tr><th>Hostname</th><th>Service</th><th>Managed</th></tr></thead>
-              <tbody>{tunnel.data.rules.map((r, i) => <tr key={`${r.hostname}-${i}`}><td>{r.hostname || <span className="muted">catch-all</span>}</td><td><code>{r.service}</code></td><td>{r.managed ? <Badge tone="info">Kapil Cloud</Badge> : <span className="muted">no</span>}</td></tr>)}</tbody>
+              <tbody>{tunnel.data.rules.map((r, i) => <tr key={`${r.hostname}-${i}`}><td>{r.hostname || <span className="muted">catch-all</span>}</td><td><code>{r.service}</code></td><td>{r.managed ? <Badge tone="info">Sampanna Cloud</Badge> : <span className="muted">no</span>}</td></tr>)}</tbody>
             </table></div>
           )}
         </Card>

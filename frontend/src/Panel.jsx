@@ -1,4 +1,4 @@
-// Kapil Cloud shell: session, live socket, sidebar navigation (admin vs user), command palette, routing.
+// Sampanna Cloud shell: session, live socket, sidebar navigation (admin vs user), command palette, routing.
 import { useEffect, useMemo, useState, lazy, Suspense } from 'react';
 import { LiveCtx } from './live.js';
 import { io } from 'socket.io-client';
@@ -197,7 +197,7 @@ function Shell() {
   }
 
   if (!me || !socket) {
-    return <div className="boot"><div className="boot__logo">K</div><SkeletonRows rows={3} /></div>;
+    return <div className="boot"><div className="boot__logo">S</div><SkeletonRows rows={3} /></div>;
   }
 
   const first = ALIASES[route[0]] || route[0] || 'overview';
@@ -245,8 +245,8 @@ function Shell() {
       <div className={`shell ${navOpen ? 'shell--nav' : ''}`}>
         <aside className="side" aria-label="Main navigation">
           <a className="brand" href={href('overview')}>
-            <span className="brand__mark">K</span>
-            <span className="brand__text">Kapil Cloud<small>{me.isAdmin ? 'Admin console' : 'Cloud dashboard'}</small></span>
+            <span className="brand__mark">S</span>
+            <span className="brand__text">Sampanna Cloud<small>{me.isAdmin ? 'Admin console' : 'Cloud dashboard'}</small></span>
           </a>
           <nav>
             {nav.map(([group, items]) => (

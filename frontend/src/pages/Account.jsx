@@ -216,7 +216,7 @@ export function SshKeys() {
             <div><button type="submit" className="btn btn--primary"><Icon name="plus" size={14} /> Add key</button></div>
           </form>
         </Card>
-        <Card title="Install on a server" sub="Writes your keys into authorized_keys between Kapil Cloud marker lines. Keys added by hand stay.">
+        <Card title="Install on a server" sub="Writes your keys into authorized_keys between Sampanna Cloud marker lines. Keys added by hand stay.">
           {servers.length ? (
             <form className="form" onSubmit={doSync}>
               <Field label="Server"><select value={sync.container || servers[0]} onChange={(e) => setSync({ ...sync, container: e.target.value })}>{servers.map((s) => <option key={s}>{s}</option>)}</select></Field>

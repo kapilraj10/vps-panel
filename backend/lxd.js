@@ -262,7 +262,7 @@ export async function execStream(name, command, { env = {}, cwd, user = 0, timeo
   await Promise.all(Object.values(socks).map(opened));
   const timer = setTimeout(() => {
     try { socks.control.send(JSON.stringify({ command: 'signal', args: {}, signal: 9 })); } catch { /* gone */ }
-    push(Buffer.from(`\n[Kapil Cloud] Stopped after ${Math.round(timeoutMs / 60000)} minutes\n`));
+    push(Buffer.from(`\n[Sampanna Cloud] Stopped after ${Math.round(timeoutMs / 60000)} minutes\n`));
   }, timeoutMs);
   try {
     const meta = await waitOperation(res, { timeoutMs: timeoutMs + 60_000 });

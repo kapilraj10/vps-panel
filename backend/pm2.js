@@ -115,7 +115,7 @@ export function createPm2({ dataDir }) {
     const p = await find(req.params.id);
     if (req.body?.confirm !== p.name) throw bad(`Type "${p.name}" exactly to confirm`);
     guardSelf(p, 'delete');
-    if (p.managed) throw bad('This process belongs to a Kapil Cloud application. Remove the replica from the Applications page.');
+    if (p.managed) throw bad('This process belongs to a Sampanna Cloud application. Remove the replica from the Applications page.');
     await locks.with(`pm2:${p.name}`, `delete ${p.name}`, () => pm2(['delete', String(p.id)], `delete ${p.name}`));
     log(req, 'pm2_delete', p.name);
     res.json({ ok: true });
@@ -125,7 +125,7 @@ export function createPm2({ dataDir }) {
   router.post('/processes', requireSuperAdmin, wrap(async (req, res) => {
     const b = req.body || {};
     const name = str(b.name, { max: 64, name: 'Name', re: NAME_RE });
-    if (name.startsWith('kc-')) throw bad('Names starting with kc- are reserved for Kapil Cloud replicas');
+    if (name.startsWith('kc-')) throw bad('Names starting with kc- are reserved for Sampanna Cloud replicas');
     const cwd = allowedDir(b.cwd, 'Working folder');
     const script = str(b.script, { max: 200, name: 'Script', re: /^[A-Za-z0-9._/@:-]+$/ });
     if (script.includes('..')) throw bad('Script may not contain ..');

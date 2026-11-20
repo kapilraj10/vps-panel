@@ -63,7 +63,7 @@ async function allocate(n, [lo, hi], { prefer = null, exclude = new Set() } = {}
     for (let i = 0; i < n; i += 1) {
       const p = prefer + i;
       if (p < 1024 || p > 65535) throw bad(`Port ${p} is out of range`);
-      if (used.has(p) || exclude.has(p)) throw conflict(`Port ${p} is already used by another Kapil Cloud application`);
+      if (used.has(p) || exclude.has(p)) throw conflict(`Port ${p} is already used by another Sampanna Cloud application`);
       if (!(await portFree(p))) throw conflict(`Port ${p} is already in use on this server`);
       out.push(p);
     }

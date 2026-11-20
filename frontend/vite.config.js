@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// Two pages: the panel (index.html) and the public login page (login.html).
+// Three pages: the panel (index.html), the public login/sign-up page (login.html) and the landing page (landing.html).
 // During `npm run dev`, forward API + live socket to the backend on port 4000
 export default defineConfig({
   plugins: [
@@ -14,7 +14,8 @@ export default defineConfig({
       name: 'login-route',
       configureServer(server) {
         server.middlewares.use((req, _res, next) => {
-          if (req.url === '/login') req.url = '/login.html';
+          if (req.url === '/login' || req.url === '/register') req.url = '/login.html';
+          if (req.url === '/home') req.url = '/landing.html';
           next();
         });
       },
@@ -25,6 +26,7 @@ export default defineConfig({
       input: {
         main: resolve(here, 'index.html'),
         login: resolve(here, 'login.html'),
+        landing: resolve(here, 'landing.html'),
       },
     },
   },

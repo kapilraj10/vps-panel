@@ -1,4 +1,4 @@
-// SQLite storage: users, sessions, audit log, backups mirror, and the Kapil Cloud tables
+// SQLite storage: users, sessions, audit log, backups mirror, and the Sampanna Cloud tables
 // (container ownership, settings, metrics, alerts, SSH keys, apps, deployments, domains).
 // Schema changes go through numbered migrations; the DB file is copied before any migration runs.
 import Database from 'better-sqlite3';
@@ -15,7 +15,7 @@ fs.chmodSync(DB_PATH, 0o600);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
-// ---------- baseline (the schema before Kapil Cloud; unchanged so old databases match) ----------
+// ---------- baseline (the schema before Sampanna Cloud; unchanged so old databases match) ----------
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id             INTEGER PRIMARY KEY,
@@ -124,7 +124,7 @@ const MIGRATIONS = [
         updated_by TEXT
       );
 
-      -- Panel-side facts about LXD instances. origin 'existing' = was there before Kapil Cloud (protected by default)
+      -- Panel-side facts about LXD instances. origin 'existing' = was there before Sampanna Cloud (protected by default)
       CREATE TABLE container_meta (
         name       TEXT PRIMARY KEY,
         protected  INTEGER NOT NULL DEFAULT 0,
@@ -591,7 +591,7 @@ migrate();
 export const USERNAME_RE = /^[a-z][a-z0-9_-]{1,31}$/;
 // LXD instance names: letters, digits, dashes; must start with a letter
 export const CONTAINER_RE = /^[a-zA-Z][a-zA-Z0-9-]{0,62}$/;
-// Names Kapil Cloud gives new containers (also valid hostnames)
+// Names Sampanna Cloud gives new containers (also valid hostnames)
 export const NEW_CONTAINER_RE = /^[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 export const MIN_PASSWORD = 10;
 export const ROLES = ['super_admin', 'admin', 'user'];
@@ -737,6 +737,10 @@ export const SETTING_DEFAULTS = {
   alert_packet_loss: 5, // percent
   require_2fa_admins: false, // admins without two-factor login can only reach their account page until they set it up
   notify_webhook_url: '', // POSTed JSON for every new critical/warning alert (Slack/Discord/ntfy-compatible text field)
+  // Public sign-up (landing page)
+  signup_enabled: true,
+  signup_requires_approval: false, // new accounts start suspended until an admin activates them
+  signup_credit: 0, // paisa put in a new account's wallet (free trial); 0 = none
   // Billing (prepaid wallets; money in paisa)
   billing_enabled: true,
   billing_currency: 'NPR',

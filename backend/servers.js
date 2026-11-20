@@ -322,7 +322,7 @@ export function createServers({ io, containers, allocator, stacks = null, billin
       return job(req, n, 'create', async (p) => {
         p('Downloading image and creating (first time for an image can take a few minutes)');
         try {
-          await createInstance({ name: n, image: b.image, config, devices, description: `Kapil Cloud server${owner ? ` for ${owner.username}` : ''}` },
+          await createInstance({ name: n, image: b.image, config, devices, description: `Sampanna Cloud server${owner ? ` for ${owner.username}` : ''}` },
             (m) => { const d = m.download_progress || m.create_instance_from_image_unpack_progress; if (d) p(d); });
         } catch (err) {
           if (!/already exists/i.test(err.message)) containerMeta.remove(n);
@@ -596,6 +596,9 @@ export function createServers({ io, containers, allocator, stacks = null, billin
       if (!list || list.length > 20 || !list.every((s) => /^(?=.{3,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(s))) throw bad('Domain suffixes must be domain names like gyannportal.com');
       settings.set('allowed_domain_suffixes', list, req.session.username);
     }
+    if (b.signup_enabled !== undefined) settings.set('signup_enabled', b.signup_enabled === true, req.session.username);
+    if (b.signup_requires_approval !== undefined) settings.set('signup_requires_approval', b.signup_requires_approval === true, req.session.username);
+    num('signup_credit', 0, 1e9, true);
     if (b.auto_app_domains !== undefined) settings.set('auto_app_domains', b.auto_app_domains === true, req.session.username);
     if (b.auto_app_domain_suffix !== undefined) {
       const sfx = String(b.auto_app_domain_suffix || '').trim().toLowerCase();

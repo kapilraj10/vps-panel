@@ -185,8 +185,8 @@ export function createDocker() {
     const c = await dockerRequest('GET', `/containers/${id}/json`);
     const name = c.Name.replace(/^\//, '');
     if (req.body?.confirm !== name) throw bad(`Type "${name}" exactly to confirm`);
-    if (c.Config.Labels?.['kapil.cloud.app']) throw bad('This container is a Kapil Cloud replica. Remove it from the Applications page.');
-    if (c.Config.Labels?.['kapil.cloud.db']) throw bad('This container is a Kapil Cloud database. Remove it from the Databases page.');
+    if (c.Config.Labels?.['kapil.cloud.app']) throw bad('This container is a Sampanna Cloud replica. Remove it from the Applications page.');
+    if (c.Config.Labels?.['kapil.cloud.db']) throw bad('This container is a Sampanna Cloud database. Remove it from the Databases page.');
     await locks.with(`docker:${id}`, `remove ${name}`, () => dockerRequest('DELETE', `/containers/${id}`, { query: { force: !!req.body.force, v: false } }));
     log(req, 'docker_remove', name, req.body.force ? 'force' : null);
     res.json({ ok: true });
@@ -195,7 +195,7 @@ export function createDocker() {
   router.post('/containers', requireSuperAdmin, wrap(async (req, res) => {
     const b = req.body || {};
     const name = str(b.name, { max: 63, name: 'Name', re: NAME_RE });
-    if (name.startsWith('kc-') || name.startsWith('kdb-')) throw bad('Names starting with kc- or kdb- are reserved for Kapil Cloud');
+    if (name.startsWith('kc-') || name.startsWith('kdb-')) throw bad('Names starting with kc- or kdb- are reserved for Sampanna Cloud');
     const image = str(b.image, { max: 255, name: 'Image', re: IMAGE_RE });
     const ports = (Array.isArray(b.ports) ? b.ports : []).slice(0, 20).map((p) => ({
       host: int(p.host, { min: 1024, max: 65535, name: 'Host port' }), container: int(p.container, { min: 1, max: 65535, name: 'Container port' }),

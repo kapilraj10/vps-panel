@@ -1,4 +1,4 @@
-// Kapil Cloud UI kit: icons, layout pieces, toasts, confirm dialogs, charts, command palette, hash router.
+// Sampanna Cloud UI kit: icons, layout pieces, toasts, confirm dialogs, charts, command palette, hash router.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { api, clock, useColors, Dialog } from './lib.jsx';

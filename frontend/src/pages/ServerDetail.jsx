@@ -306,7 +306,7 @@ function SettingsTab({ c, d, reload, busy }) {
       {sup && (
         <Card title="Danger zone" className="danger" sub={isProtected ? 'Protected: delete and rebuild are blocked.' : 'These actions destroy data.'}>
           <div className="danger__row">
-            <div><strong>Protection</strong><p className="muted small">Blocks delete and rebuild. Servers that existed before Kapil Cloud start protected.</p></div>
+            <div><strong>Protection</strong><p className="muted small">Blocks delete and rebuild. Servers that existed before Sampanna Cloud start protected.</p></div>
             {isProtected ? <button type="button" className="btn btn--danger" onClick={() => protect(false)}><Icon name="lock" size={14} /> Remove protection</button>
               : <button type="button" className="btn" onClick={() => protect(true)}><Icon name="lock" size={14} /> Protect</button>}
           </div>
@@ -378,7 +378,7 @@ function StackTab({ c, busy }) {
   if (!data) return <Card><SkeletonRows rows={3} /></Card>;
   return (
     <div className="grid2">
-      <Card title="Ready stack" sub={s ? `Last run by ${s.by} · ${dateTime(s.finishedAt || s.startedAt)}` : 'Nothing set up by Kapil Cloud yet'}>
+      <Card title="Ready stack" sub={s ? `Last run by ${s.by} · ${dateTime(s.finishedAt || s.startedAt)}` : 'Nothing set up by Sampanna Cloud yet'}>
         {s ? (
           <>
             <p>

@@ -136,10 +136,11 @@ test('existing containers are adopted as protected', async () => {
 });
 
 // ---------- auth & CSRF ----------
-test('unauthenticated API calls get 401, pages redirect to /login', async () => {
+test('unauthenticated API calls get 401, / is the public landing page, panel pages redirect to /login', async () => {
   const anon = new Client();
   assert.equal((await anon.get('/api/containers')).status, 401);
-  const r = await fetch(`${BASE}/`, { redirect: 'manual' });
+  assert.equal((await fetch(`${BASE}/`, { redirect: 'manual' })).status, 200);
+  const r = await fetch(`${BASE}/servers`, { redirect: 'manual' });
   assert.equal(r.status, 302);
 });
 

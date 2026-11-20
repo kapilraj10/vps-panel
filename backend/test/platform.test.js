@@ -224,7 +224,7 @@ test('2FA: setup, login needs the code, replay refused, recovery code works once
   assert.equal((await c.post('/api/me/2fa/setup', { password: 'wrong' })).status, 400);
   const s = await c.post('/api/me/2fa/setup', { password: PW });
   assert.equal(s.status, 200);
-  assert.match(s.data.uri, /^otpauth:\/\/totp\/Kapil%20Cloud%3Adev\?secret=[A-Z2-7]+&issuer=Kapil%20Cloud/);
+  assert.match(s.data.uri, /^otpauth:\/\/totp\/Sampanna%20Cloud%3Adev\?secret=[A-Z2-7]+&issuer=Sampanna%20Cloud/);
   const secret = s.data.secret.replace(/ /g, '');
   assert.equal((await c.post('/api/me/2fa/enable', { code: '000000' })).status, 400);
   const en = await c.post('/api/me/2fa/enable', { code: codeAt(secret) });

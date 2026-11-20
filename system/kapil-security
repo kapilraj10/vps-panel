@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Kapil Cloud security helper. Runs as root through ONE sudoers line (system/kapil-security.sudoers) and nothing else.
+// Sampanna Cloud security helper. Runs as root through ONE sudoers line (system/kapil-security.sudoers) and nothing else.
 // Installed by system/install-security.sh at /usr/local/sbin/kapil-security. Plain Node, no dependencies.
 //
 // Fixed subcommands only; every argument is validated; every program gets an argument array (never a shell string):

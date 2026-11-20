@@ -68,7 +68,7 @@ export function createAppHost({ containers, allocator }) {
         containerMeta.createdByPanel(host, { image: HOST_IMAGE, by: MANAGED_BY });
         try {
           await createInstance({
-            name: host, image: HOST_IMAGE, description: `Kapil Cloud app host for ${user.username}`,
+            name: host, image: HOST_IMAGE, description: `Sampanna Cloud app host for ${user.username}`,
             config: {
               'limits.cpu': String(w.cpu), 'limits.memory': `${w.memoryMb}MiB`, 'limits.memory.enforce': 'hard',
               'security.privileged': 'false', 'security.nesting': 'false', 'boot.autostart': 'true',
