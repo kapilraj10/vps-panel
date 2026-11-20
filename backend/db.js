@@ -831,6 +831,7 @@ export const SETTING_DEFAULTS = {
   signup_enabled: true,
   signup_requires_approval: false, // new accounts start suspended until an admin activates them
   signup_credit: 0, // paisa put in a new account's wallet (free trial); 0 = none
+  support_contact: '', // shown on the customers' Support page and the landing page (email, phone, hours)
   // Billing (prepaid wallets; money in paisa)
   billing_enabled: true,
   billing_currency: 'NPR',

@@ -24,6 +24,7 @@ export function createSignup({ startSession, addCredit = null }) {
       signup: { enabled: settings.get('signup_enabled') !== false, approval: settings.get('signup_requires_approval') === true, credit: settings.get('signup_credit') || 0 },
       currency: settings.get('billing_currency') || 'NPR',
       plans: plans.list({ activeOnly: true }).map((p) => ({ kind: p.kind, name: p.name, cpu: p.cpu, memoryMb: p.memory_mb, diskGb: p.disk_gb, priceDay: p.price_day, description: p.description, maxApps: p.max_apps ?? null })),
+      support: settings.get('support_contact') || '',
       domain: settings.get('auto_app_domain_suffix') || (settings.get('allowed_domain_suffixes') || [])[0] || null,
     });
   });

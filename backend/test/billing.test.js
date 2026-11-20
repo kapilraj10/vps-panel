@@ -364,3 +364,18 @@ test('public sign-up, landing page and settings', async () => {
   const audit = (await sup.get('/api/audit?action=user_register')).data.entries;
   assert.ok(audit.some((e) => e.username === 'sita' && e.result === 'success'));
 });
+
+test('dashboards: platform totals for admins, own totals + wallet for customers, per-customer cloud view', async () => {
+  const a = (await sup.get('/api/overview')).data.cloud;
+  assert.ok(a.revenue.month > 0, 'charges this month count as revenue');
+  assert.ok(a.wallets.customers >= 2);
+  assert.equal(typeof a.packages, 'number');
+  assert.ok('main' in a.apps && 'vps' in a.apps && 'total' in a.databases);
+  const u = (await ana.get('/api/overview')).data;
+  assert.equal(u.cloud.revenue, undefined, 'customers never see platform money');
+  assert.equal(typeof u.wallet.balance, 'number');
+  assert.equal((await ana.get(`/api/admin/users/${ids.ana}/cloud`)).status, 403);
+  const c = (await sup.get(`/api/admin/users/${ids.ana}/cloud`)).data;
+  assert.ok(Array.isArray(c.apps) && Array.isArray(c.databases) && Array.isArray(c.vps));
+  assert.equal(c.wallet.username, 'ana');
+});

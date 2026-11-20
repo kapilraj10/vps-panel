@@ -600,6 +600,7 @@ export function createServers({ io, containers, allocator, stacks = null, billin
     if (b.signup_enabled !== undefined) settings.set('signup_enabled', b.signup_enabled === true, req.session.username);
     if (b.signup_requires_approval !== undefined) settings.set('signup_requires_approval', b.signup_requires_approval === true, req.session.username);
     num('signup_credit', 0, 1e9, true);
+    if (b.support_contact !== undefined) settings.set('support_contact', String(b.support_contact || '').replace(/[<>]/g, '').slice(0, 500), req.session.username);
     if (b.auto_app_domains !== undefined) settings.set('auto_app_domains', b.auto_app_domains === true, req.session.username);
     if (b.auto_app_domain_suffix !== undefined) {
       const sfx = String(b.auto_app_domain_suffix || '').trim().toLowerCase();

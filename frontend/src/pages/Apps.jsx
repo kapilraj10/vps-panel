@@ -287,13 +287,23 @@ export default function Apps({ selected }) {
   const { me } = useLive();
   const { data, error, reload } = useApi('/api/apps', { interval: 20000 });
   const [creating, setCreating] = useState(false);
+  const [q, setQ] = useState('');
+  const [target, setTarget] = useState('all');
   if (selected) return <AppDetail id={selected} />;
-  const apps = data?.apps || [];
+  const apps = (data?.apps || [])
+    .filter((a) => target === 'all' || (a.target || 'server') === target)
+    .filter((a) => !q || `${a.name} ${a.owner} ${a.repoUrl} ${where(a)}`.toLowerCase().includes(q.toLowerCase()));
   return (
     <>
       <PageHeader title="Applications" sub="Deploy from Git into your servers. Each app runs under PM2 inside its server."
         actions={<button type="button" className="btn btn--primary" onClick={() => setCreating(true)}><Icon name="plus" size={16} /> New application</button>} />
       <ErrorNote error={error} onRetry={reload} />
+      {(data?.apps || []).length > 3 && (
+        <div className="filters">
+          <div className="input-icon"><Icon name="search" size={16} /><input placeholder={me.isAdmin ? 'Filter by app, owner or repository' : 'Filter'} value={q} onChange={(e) => setQ(e.target.value)} /></div>
+          <div className="seg">{[['all', 'all'], ['main', 'main server'], ['vps', 'VPS'], ['server', 'cloud server']].map(([id, label]) => <button key={id} type="button" aria-pressed={target === id} onClick={() => setTarget(id)}>{label}</button>)}</div>
+        </div>
+      )}
       <Card pad={false}>
         {!data ? <div className="pad"><SkeletonRows /></div> : apps.length ? (
           <div className="table-wrap"><table className="table">

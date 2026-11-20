@@ -143,7 +143,7 @@ added 214 packages in 9s
       </section>
 
       <footer className="lp-foot">
-        <span>© {new Date().getFullYear()} Sampanna Cloud · Kathmandu, Nepal</span>
+        <span>© {new Date().getFullYear()} Sampanna Cloud · Kathmandu, Nepal{info?.support ? ` · ${info.support}` : ''}</span>
         <span><a href="/login">Log in</a>{signup && <> · <a href="/register">Sign up</a></>}</span>
       </footer>
     </div>

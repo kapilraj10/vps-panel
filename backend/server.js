@@ -38,7 +38,7 @@ import { createDatabases } from './databases.js';
 import { createSecurity } from './security.js';
 import { createTwoFactor, enforceTwoFactor, loginTickets, twoFactorOn, mustSetup } from './twofactor.js';
 import { createMaster } from './master.js';
-import { createBilling } from './billing.js';
+import { createBilling, periodOf, periodRange } from './billing.js';
 import { createAppHost } from './apphost.js';
 import { createSignup } from './signup.js';
 import { createMyServers } from './myservers.js';
@@ -447,9 +447,14 @@ app.get('/api/overview', (req, res) => {
   const base = {
     servers: { total: mine.length, running: mine.filter((c) => c.status === 'Running').length, stopped: mine.filter((c) => c.status !== 'Running').length },
     apps: isAdmin(s) ? db.prepare('SELECT COUNT(*) AS n FROM apps').get().n : db.prepare(`SELECT COUNT(*) AS n FROM apps WHERE container IN (SELECT container FROM user_containers WHERE user_id = ?)`).get(s.id).n,
-    domains: isAdmin(s) ? db.prepare("SELECT COUNT(*) AS n FROM domains WHERE status = 'active'").get().n : db.prepare("SELECT COUNT(*) AS n FROM domains WHERE status = 'active' AND container IN (SELECT container FROM user_containers WHERE user_id = ?)").get(s.id).n,
+    domains: isAdmin(s) ? db.prepare("SELECT COUNT(*) AS n FROM domains WHERE status = 'active'").get().n : db.prepare("SELECT COUNT(*) AS n FROM domains WHERE status = 'active' AND (user_id = ? OR container IN (SELECT container FROM user_containers WHERE user_id = ?))").get(s.id, s.id).n,
+    cloud: cloudSummary(isAdmin(s) ? null : s.id),
   };
-  if (!isAdmin(s)) return res.json(base);
+  if (!isAdmin(s)) {
+    base.apps = db.prepare('SELECT COUNT(*) AS n FROM apps WHERE user_id = ? OR container IN (SELECT container FROM user_containers WHERE user_id = ?)').get(s.id, s.id).n;
+    const w = billing.walletOf(s.id);
+    return res.json({ ...base, wallet: { balance: w.balance, burnPerDay: w.burnPerDay, daysLeft: w.daysLeft, state: w.state, low: w.low, currency: w.currency } });
+  }
   const activeSince = Date.now() - 15 * 60_000;
   const lastJob = backupJobs.recent(1)[0] || null;
   return res.json({
@@ -467,6 +472,50 @@ app.get('/api/overview', (req, res) => {
     terminals: terminal.list().length,
     consoles: sshConsole.list().length,
     hostApps: replicas.counts(),
+  });
+});
+
+// Tenant-level counts for the dashboards. userId = null: the whole platform (admin), else one customer.
+function cloudSummary(userId) {
+  const where = userId ? 'WHERE user_id = ?' : '';
+  const a = userId ? [userId] : [];
+  const apps = db.prepare(`SELECT target, status, COUNT(*) AS n FROM apps ${where} GROUP BY target, status`).all(...a);
+  const sum = (f) => apps.filter(f).reduce((t, r) => t + r.n, 0);
+  const dbs = db.prepare(`SELECT target, COUNT(*) AS n FROM databases ${userId ? 'WHERE owner_id = ?' : ''} GROUP BY target`).all(...a);
+  const out = {
+    apps: { total: sum(() => true), running: sum((r) => r.status === 'running'), stopped: sum((r) => ['stopped', 'failed'].includes(r.status)),
+      main: sum((r) => r.target === 'main'), vps: sum((r) => r.target === 'vps'), server: sum((r) => (r.target || 'server') === 'server') },
+    databases: { total: dbs.reduce((t, r) => t + r.n, 0), main: dbs.filter((r) => r.target !== 'vps').reduce((t, r) => t + r.n, 0), vps: dbs.filter((r) => r.target === 'vps').reduce((t, r) => t + r.n, 0) },
+    customerVps: db.prepare(`SELECT COUNT(*) AS n FROM customer_servers ${where}`).get(...a).n,
+    customerVpsOnline: db.prepare(`SELECT COUNT(*) AS n FROM customer_servers ${where ? `${where} AND` : 'WHERE'} status = 'online'`).get(...a).n,
+  };
+  if (!userId) {
+    const monthStart = periodRange(periodOf(Date.now())).start;
+    const tx = (kind) => db.prepare('SELECT COALESCE(SUM(amount), 0) AS s FROM wallet_tx WHERE kind = ? AND created_at >= ?').get(kind, monthStart).s;
+    const w = db.prepare("SELECT COALESCE(SUM(balance), 0) AS total, SUM(balance <= 0) AS empty, COUNT(*) AS n FROM users WHERE role = 'user'").get();
+    out.revenue = { month: -tx('charge'), topupsMonth: tx('topup'), perDay: db.prepare('SELECT COALESCE(SUM(price_day), 0) AS s FROM billed_resources WHERE ended_at IS NULL AND paused = 0').get().s };
+    out.wallets = { total: w.total, empty: w.empty || 0, customers: w.n, suspended: db.prepare("SELECT COUNT(*) AS n FROM users WHERE billing_state = 'stopped'").get().n };
+    out.packages = db.prepare("SELECT COUNT(*) AS n FROM users WHERE hosting_plan_id IS NOT NULL").get().n;
+    out.billedResources = db.prepare('SELECT COUNT(*) AS n FROM billed_resources WHERE ended_at IS NULL').get().n;
+    out.currency = settings.get('billing_currency') || 'NPR';
+  }
+  return out;
+}
+
+// Admin: everything one customer has, in one place
+app.get('/api/admin/users/:id/cloud', requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const u = users.byId(id);
+  if (!u) return res.status(404).json({ error: 'No such user' });
+  res.set('Cache-Control', 'no-store');
+  return res.json({
+    summary: cloudSummary(id),
+    wallet: u.role === 'user' ? billing.walletOf(id) : null,
+    apps: db.prepare('SELECT id, name, target, container, type, status, port, last_deploy_at AS lastDeployAt FROM apps WHERE user_id = ? ORDER BY name').all(id),
+    databases: db.prepare('SELECT id, name, engine, version, target, status FROM databases WHERE owner_id = ? ORDER BY name').all(id),
+    vps: db.prepare('SELECT id, name, host, port, status, last_check_at AS lastCheckAt FROM customer_servers WHERE user_id = ? ORDER BY name').all(id),
+    servers: u.containers,
+    package: (() => { const p = db.prepare('SELECT p.name, p.max_apps, p.price_day FROM users x JOIN plans p ON p.id = x.hosting_plan_id WHERE x.id = ?').get(id); return p ? { name: p.name, maxApps: p.max_apps, priceDay: p.price_day } : null; })(),
   });
 });
 

@@ -80,6 +80,26 @@ function UserForm({ open, onClose, user, containers, onSaved }) {
   );
 }
 
+// Everything a customer has: apps, databases, their VPS, package and wallet
+function UserCloud({ id }) {
+  const { data } = useApi(`/api/admin/users/${id}/cloud`);
+  if (!data) return <SkeletonRows rows={2} />;
+  const cur = data.wallet?.currency || 'NPR';
+  const money = (p) => `${cur} ${(p / 100).toFixed(2)}`;
+  return (
+    <>
+      <h3 className="h3">Cloud</h3>
+      <dl className="facts facts--cols">
+        {data.wallet && <div><dt>Wallet</dt><dd>{money(data.wallet.balance)} · {money(data.wallet.burnPerDay)}/day · {data.wallet.state} <a href={href('billing')}>billing</a></dd></div>}
+        <div><dt>Hosting package</dt><dd>{data.package ? `${data.package.name} (${data.package.maxApps ?? '∞'} apps, ${money(data.package.priceDay)}/day)` : 'none'}</dd></div>
+        <div><dt>Applications</dt><dd>{data.apps.length ? data.apps.map((a) => <a key={a.id} className="chip" href={href(`apps/${a.id}`)}>{a.name} · {a.target === 'main' ? 'main' : a.target === 'vps' ? 'VPS' : a.container} · {a.status}</a>) : 'none'}</dd></div>
+        <div><dt>Databases</dt><dd>{data.databases.length ? data.databases.map((d) => <span key={d.id} className="chip">{d.name} · {d.engine} · {d.target === 'vps' ? 'VPS' : 'main'} · {d.status}</span>) : 'none'}</dd></div>
+        <div><dt>Connected VPS</dt><dd>{data.vps.length ? data.vps.map((v) => <span key={v.id} className="chip">{v.name} ({v.host}) · {v.status}</span>) : 'none'}</dd></div>
+      </dl>
+    </>
+  );
+}
+
 function UserDetail({ id, onClose }) {
   const { me } = useLive();
   const run = useAction();
@@ -104,6 +124,7 @@ function UserDetail({ id, onClose }) {
             <div><dt>Memory in use</dt><dd>{bytes(u.usage.memUsed)} of {bytes(u.usage.memLimit)}</dd></div>
             <div><dt>Disk in use</dt><dd>{bytes(u.usage.diskUsed)} of {bytes(u.usage.diskLimit)}</dd></div>
           </dl>
+          {u.role === 'user' && <UserCloud id={u.id} />}
           <h3 className="h3">Active sessions</h3>
           {data.sessions.length ? <ul className="plain">{data.sessions.map((s) => <li key={s.id}>{s.ip || '?'} · last active {ago(s.lastSeenAt)} · <span className="muted">{s.userAgent}</span></li>)}</ul> : <p className="muted">None</p>}
           <h3 className="h3">Recent activity</h3>
