@@ -245,3 +245,64 @@ test('users delete only servers they made; billing ends; admin can bill an exist
   assert.equal(ov.totals.burnPerDay, 1500);
   assert.ok(ov.totals.charged30d >= 7200);
 });
+
+test('main server target: app plan, managed app host made, runtime + deploy run, billed, deleted with the last app', async () => {
+  const p = await sup.post('/api/billing/plans', { kind: 'app', name: 'App S', cpu: 1, memoryMb: 512, diskGb: 5, priceDay: 1200 });
+  assert.equal(p.status, 201, JSON.stringify(p.data));
+  const plans = (await bob.get('/api/apps/plans')).data.plans;
+  assert.equal(plans[0].name, 'App S');
+  const body = { target: 'main', planId: p.data.plan.id, name: 'shop', type: 'node', repoUrl: 'https://github.com/x/shop.git', branch: 'main' };
+  assert.equal((await bob.post('/api/apps', { ...body, planId: undefined })).status, 400, 'plan required');
+  assert.equal((await bob.post('/api/apps', body)).status, 402, 'bob cannot afford it with his server bill');
+  await sup.post(`/api/billing/users/${ids.bob}/tx`, { amount: 50000 });
+  const r = await bob.post('/api/apps', body);
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  const id = r.data.app.id;
+  assert.equal(r.data.app.container, 'apps-bob');
+  assert.equal(r.data.app.target, 'main');
+  const done = await until(async () => { const d = (await bob.get(`/api/apps/${id}`)).data; return d.app.status === 'running' ? d : null; }, 30000);
+  assert.deepEqual(done.deployments.map((d) => d.kind).reverse(), ['provision', 'runtime', 'deploy']);
+  const inst = lxd.calls.filter((c) => c.method === 'POST' && c.path === '/1.0/instances').map((c) => c.body).find((b) => b.name === 'apps-bob');
+  assert.equal(inst.config['security.privileged'], 'false');
+  assert.equal(inst.config['limits.memory'], '512MiB');
+  assert.equal((await bob.get('/api/containers/apps-bob')).status, 200, 'bob reaches his app host');
+  assert.equal((await ana.get(`/api/apps/${id}`)).status, 403);
+  assert.equal((await bob.del('/api/containers/apps-bob', { confirm: 'apps-bob', stopFirst: true })).status, 403, 'not deletable as a server');
+  assert.equal((await bob.post('/api/apps', { container: 'apps-bob', name: 'x2', type: 'node', repoUrl: 'https://github.com/x/y.git' })).status, 400);
+  const w = (await bob.get('/api/billing/me')).data.wallet;
+  assert.ok(w.resources.some((x) => x.kind === 'app' && x.name === 'apps-bob/shop' && x.priceDay === 1200));
+
+  // a second app grows the host; the port moves on if taken
+  const r2 = await bob.post('/api/apps', { ...body, name: 'blog' });
+  assert.equal(r2.status, 201);
+  assert.equal(r2.data.app.port, 3001);
+  await until(async () => (await bob.get(`/api/apps/${r2.data.app.id}`)).data.app.status === 'running', 30000);
+  await until(() => lxd.calls.some((c) => c.method === 'PUT' && c.path === '/1.0/instances/apps-bob' && c.body.config['limits.memory'] === '1024MiB'));
+
+  assert.equal((await bob.del(`/api/apps/${r2.data.app.id}`, { confirm: 'blog' })).status, 200);
+  assert.equal((await bob.del(`/api/apps/${id}`, { confirm: 'shop' })).status, 200);
+  await until(async () => (await sup.get('/api/containers/apps-bob')).status === 404, 20000);
+  assert.ok(one("SELECT ended_at FROM billed_resources WHERE name = 'apps-bob/shop'").ended_at);
+});
+
+test('starter plans and the automatic app subdomain', async () => {
+  assert.equal((await ana.post('/api/billing/plans/starter')).status, 403);
+  const s = await sup.post('/api/billing/plans/starter');
+  assert.equal(s.status, 200);
+  assert.ok(s.data.created.includes('App Mini') && s.data.created.includes('DB Mini') && s.data.created.includes('Server Small'));
+  assert.equal((await sup.post('/api/billing/plans/starter')).data.created.length, 0, 'idempotent');
+  const mini = s.data.plans.find((p) => p.name === 'App Mini');
+  await sup.post(`/api/billing/users/${ids.ana}/tx`, { amount: 100000 });
+  const r = await ana.post('/api/apps', { target: 'main', planId: mini.id, name: 'Shop_1'.toLowerCase().replace('_', '-'), type: 'node', repoUrl: 'https://github.com/x/shop.git' });
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  assert.equal(r.data.app.priceDay, 1500);
+  const done = await until(async () => { const d = (await ana.get(`/api/apps/${r.data.app.id}`)).data.app; return d.status === 'running' && d.domains.length ? d : null; }, 30000);
+  assert.equal(done.domains[0].hostname, 'shop-1-ana.gyannportal.com');
+  assert.equal(done.domains[0].status, 'manual', 'no Cloudflare API in tests: route is shown for the admin');
+  // a redeploy does not add a second one
+  assert.equal((await ana.post(`/api/apps/${r.data.app.id}/deploy`)).status, 202);
+  await until(async () => (await ana.get(`/api/apps/${r.data.app.id}`)).data.app.status === 'running' && !(await ana.get(`/api/apps/${r.data.app.id}`)).data.app.deploying);
+  assert.equal((await ana.get('/api/domains')).data.domains.filter((d) => d.appId === r.data.app.id).length, 1);
+  await sup.put('/api/settings', { auto_app_domains: false });
+  assert.equal((await sup.get('/api/settings')).data.settings.auto_app_domains, false);
+});

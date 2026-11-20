@@ -39,6 +39,7 @@ import { createSecurity } from './security.js';
 import { createTwoFactor, enforceTwoFactor, loginTickets, twoFactorOn, mustSetup } from './twofactor.js';
 import { createMaster } from './master.js';
 import { createBilling } from './billing.js';
+import { createAppHost } from './apphost.js';
 import { changeState } from './lxd.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -230,9 +231,11 @@ const billing = createBilling({
   stopDatabase: (name) => databasesMod.stopByName(name),
 });
 const servers = createServers({ io, containers, allocator, stacks, billing });
-const appsMod = createApps({ io, containers });
+const appHost = createAppHost({ containers, allocator });
+const appsMod = createApps({ io, containers, appHost, billing });
 const containerTools = createContainerTools({ containers });
 const domains = createDomains({ containers, monitoring });
+appsMod.setOnDeployed((id) => domains.autoForApp(id));
 const sshKeys = createSshKeys({ containers });
 // VPS fleet: nodes + agents, SSH console, network diagnostics, PM2/Docker on every node
 const nodes = createNodes({ io, monitoring });

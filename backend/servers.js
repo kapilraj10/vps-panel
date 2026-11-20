@@ -375,6 +375,7 @@ export function createServers({ io, containers, allocator, stacks = null, billin
         containerMeta.remove(name);
       })();
       billing?.end('server', name, req.session.username);
+      billing?.endPrefix('app', `${name}/`, req.session.username); // apps on a deleted app host
       return `Deleted ${name}`;
     }));
   }));
@@ -594,6 +595,12 @@ export function createServers({ io, containers, allocator, stacks = null, billin
       const list = Array.isArray(b.allowed_domain_suffixes) ? b.allowed_domain_suffixes.map((s) => String(s).trim().toLowerCase()).filter(Boolean) : null;
       if (!list || list.length > 20 || !list.every((s) => /^(?=.{3,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(s))) throw bad('Domain suffixes must be domain names like gyannportal.com');
       settings.set('allowed_domain_suffixes', list, req.session.username);
+    }
+    if (b.auto_app_domains !== undefined) settings.set('auto_app_domains', b.auto_app_domains === true, req.session.username);
+    if (b.auto_app_domain_suffix !== undefined) {
+      const sfx = String(b.auto_app_domain_suffix || '').trim().toLowerCase();
+      if (sfx && !/^(?=.{3,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(sfx)) throw bad('Automatic app domain must be a domain like gyannportal.com');
+      settings.set('auto_app_domain_suffix', sfx, req.session.username);
     }
     allocator.invalidate();
     audit.log({ ...who(req), action: 'settings_update', result: 'success', detail: Object.keys(b).join(', ') });

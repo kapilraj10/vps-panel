@@ -406,11 +406,11 @@ test('SSH console: live I/O, commands audited but not passwords, survives a brow
   assert.match((await emit(other, 'ssh:attach', { id: r.id })).error, /gone/, 'other users cannot attach');
   other.close();
   s.emit('ssh:input', { id: r.id, data: 'exit\r' });
-  await sleep(500);
-  const sess = (await sup.get('/api/terminal-sessions')).data.sessions.find((x) => x.id === r.id);
+  // wait for the session to end and the 'exit' line to be recorded instead of a fixed sleep (slow CI runners)
+  const sess = await until(async () => (await sup.get('/api/terminal-sessions')).data.sessions.find((x) => x.id === r.id && x.ended_at));
   assert.equal(sess.node_name, 'Kathmandu Main');
-  assert.ok(sess.ended_at);
-  const cmds = (await sup.get(`/api/terminal-sessions/${r.id}/commands`)).data.commands.map((c) => c.line);
+  const cmdLines = async () => (await sup.get(`/api/terminal-sessions/${r.id}/commands`)).data.commands.map((c) => c.line);
+  const cmds = await until(async () => { const c = await cmdLines(); return c.length >= 3 && c; });
   assert.deepEqual(cmds, ['uptime', 'sudo ls /root', 'exit']);
   assert.equal(JSON.stringify(cmds).includes('hunter2'), false, 'password typed after a prompt is not stored');
   assert.equal((await ops.get(`/api/terminal-sessions/${r.id}/commands`)).status, 403);

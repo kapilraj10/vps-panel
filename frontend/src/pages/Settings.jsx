@@ -28,6 +28,7 @@ export default function Settings() {
       alert_backup_disk_free: Number(f.alert_backup_disk_free), alert_sustain_minutes: Number(f.alert_sustain_minutes),
       terminal_idle_minutes: Number(f.terminal_idle_minutes), terminal_max_minutes: Number(f.terminal_max_minutes),
       allowed_domain_suffixes: f.allowed_domain_suffixes.split(',').map((s) => s.trim()).filter(Boolean),
+      auto_app_domains: f.auto_app_domains !== false, auto_app_domain_suffix: f.auto_app_domain_suffix || '',
     };
     if (await run(() => api('/api/settings', { method: 'PUT', body }), 'Settings saved')) alloc.reload();
   }
@@ -60,6 +61,10 @@ export default function Settings() {
               <Field label="Terminal idle timeout (minutes)"><input type="number" min={1} max={240} value={f.terminal_idle_minutes} onChange={set('terminal_idle_minutes')} /></Field>
               <Field label="Terminal maximum session (minutes)"><input type="number" min={5} max={1440} value={f.terminal_max_minutes} onChange={set('terminal_max_minutes')} /></Field>
               <Field label="Domains users may request subdomains of" hint="Comma separated" wide><input value={f.allowed_domain_suffixes} onChange={set('allowed_domain_suffixes')} /></Field>
+              <Field label="Automatic app domain" hint="After an app's first good deploy it gets <app>-<user>.<this domain>. Empty = the first domain above." wide>
+                <input value={f.auto_app_domain_suffix || ''} onChange={set('auto_app_domain_suffix')} placeholder={f.allowed_domain_suffixes.split(',')[0]?.trim()} />
+              </Field>
+              <label className="check"><input type="checkbox" checked={f.auto_app_domains !== false} onChange={(e) => setF({ ...f, auto_app_domains: e.target.checked })} /> Give every new app a subdomain automatically</label>
             </div>
           </Card>
           {sup && <div><button type="submit" className="btn btn--primary">Save settings</button></div>}

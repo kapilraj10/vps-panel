@@ -510,6 +510,52 @@ const MIGRATIONS = [
       ALTER TABLE databases ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
     `,
   },
+  {
+    version: 8,
+    name: 'apps on the main server (managed app host): app plans, app target',
+    sql: `
+      CREATE TABLE plans_new (
+        id          INTEGER PRIMARY KEY,
+        kind        TEXT NOT NULL CHECK (kind IN ('server', 'database', 'app')),
+        name        TEXT NOT NULL,
+        cpu         INTEGER,
+        memory_mb   INTEGER,
+        disk_gb     INTEGER,
+        price_day   INTEGER NOT NULL,
+        active      INTEGER NOT NULL DEFAULT 1,
+        sort        INTEGER NOT NULL DEFAULT 0,
+        description TEXT,
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        UNIQUE (kind, name)
+      );
+      INSERT INTO plans_new SELECT id, kind, name, cpu, memory_mb, disk_gb, price_day, active, sort, description, created_at, updated_at FROM plans;
+      DROP TABLE plans;
+      ALTER TABLE plans_new RENAME TO plans;
+      CREATE TABLE billed_resources_new (
+        id           INTEGER PRIMARY KEY,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kind         TEXT NOT NULL CHECK (kind IN ('server', 'database', 'app')),
+        name         TEXT NOT NULL,
+        plan_id      INTEGER REFERENCES plans(id) ON DELETE SET NULL,
+        price_day    INTEGER NOT NULL,
+        started_at   INTEGER NOT NULL,
+        ended_at     INTEGER,
+        billed_until INTEGER NOT NULL,
+        charged      INTEGER NOT NULL DEFAULT 0,
+        carry        REAL NOT NULL DEFAULT 0,
+        paused       INTEGER NOT NULL DEFAULT 0,
+        created_by   TEXT
+      );
+      INSERT INTO billed_resources_new SELECT id, user_id, kind, name, plan_id, price_day, started_at, ended_at, billed_until, charged, carry, paused, created_by FROM billed_resources;
+      DROP TABLE billed_resources;
+      ALTER TABLE billed_resources_new RENAME TO billed_resources;
+      CREATE UNIQUE INDEX billed_resources_active ON billed_resources(kind, name) WHERE ended_at IS NULL;
+      CREATE INDEX billed_resources_user ON billed_resources(user_id, ended_at);
+      ALTER TABLE apps ADD COLUMN target TEXT NOT NULL DEFAULT 'server';
+      ALTER TABLE apps ADD COLUMN plan_id INTEGER REFERENCES plans(id) ON DELETE SET NULL;
+    `,
+  },
 ];
 
 function migrate() {
@@ -676,6 +722,8 @@ export const SETTING_DEFAULTS = {
   alert_backup_disk_free: 15, // percent free on /mnt/backup
   alert_sustain_minutes: 5,
   allowed_domain_suffixes: ['gyannportal.com'], // users may request subdomains of these; others need admin approval anyway
+  auto_app_domains: true, // after an app's first good deploy it gets <app>-<user>.<suffix> automatically
+  auto_app_domain_suffix: '', // empty = the first allowed suffix
   terminal_idle_minutes: 15,
   terminal_max_minutes: 240,
   // VPS fleet
