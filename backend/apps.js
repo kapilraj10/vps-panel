@@ -28,7 +28,7 @@ export const APP_TYPES = {
 };
 
 // ---------- scripts that run inside the container ----------
-const RUNTIME_SCRIPT = `set -eu
+export const RUNTIME_SCRIPT = `set -eu
 export DEBIAN_FRONTEND=noninteractive
 echo "==> Updating package lists"
 apt-get update -q

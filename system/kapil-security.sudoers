@@ -1,0 +1,3 @@
+# Lets the panel user run the Kapil Cloud security helper (and only it) as root without a password.
+# Installed by system/install-security.sh as /etc/sudoers.d/kapil-security (mode 0440).
+kapil ALL=(root) NOPASSWD: /usr/local/sbin/kapil-security

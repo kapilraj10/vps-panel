@@ -1,0 +1,36 @@
+# CI: every push and pull request runs the backend e2e tests (fake LXD/Docker/PM2), the root-helper tests and the
+# frontend build. Nothing here touches a real server.
+name: CI
+on:
+  push:
+    branches-ignore: [kapil-cloud] # kapil-cloud runs CI inside the Deploy workflow
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+      - name: Backend dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: backend
+      - name: Backend tests
+        run: npm test
+        working-directory: backend
+      - name: Helper tests (backup, security, upgrade)
+        run: node --test system/test/*.cjs
+      - name: Frontend build
+        run: npm ci --no-audit --no-fund && npm run build
+        working-directory: frontend

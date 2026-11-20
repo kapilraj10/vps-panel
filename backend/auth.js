@@ -133,6 +133,14 @@ export const loginLimit = {
     return list.length >= LOGIN_MAX ? Math.ceil((list[0] + LOGIN_WINDOW_MS - Date.now()) / 1000) : 0;
   },
   fail(ip) { failures.set(ip, [...recent(ip), Date.now()]); },
+  // IPs with recent failures (for the Security center); blocked = at the limit right now
+  list() {
+    return [...failures.keys()].map((ip) => {
+      const l = recent(ip);
+      return l.length ? { ip, failures: l.length, last: l.at(-1), blocked: l.length >= LOGIN_MAX, retryAfter: this.retryAfter(ip) } : null;
+    }).filter(Boolean).sort((a, b) => b.last - a.last);
+  },
+  clear(ip) { return failures.delete(ip); },
 };
 
 // ---------- general API rate limit: requests per minute per session (or IP before login) ----------

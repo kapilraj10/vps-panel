@@ -53,7 +53,7 @@ export function startFakeDocker(socketPath, { flags } = {}) {
         let list = [...containers.values()];
         if (url.searchParams.get('all') !== 'true') list = list.filter((c) => c.state === 'running');
         const f = url.searchParams.get('filters');
-        if (f) for (const l of JSON.parse(f).label || []) { const [k, v] = l.split('='); list = list.filter((c) => c.labels[k] === v); }
+        if (f) for (const l of JSON.parse(f).label || []) { const [k, v] = l.split('='); list = list.filter((c) => (v === undefined ? k in c.labels : c.labels[k] === v)); }
         return send(200, list.map(listView));
       }
       if (req.method === 'POST' && p === '/containers/create') {
@@ -119,6 +119,7 @@ export function startFakeDocker(socketPath, { flags } = {}) {
         return send(200, n);
       }
       if (req.method === 'GET' && p === '/volumes') return send(200, { Volumes: [...volumes.values()] });
+      if (req.method === 'POST' && p === '/volumes/create' && json.Name.includes('broken')) return err(500, 'no space left on device');
       if (req.method === 'POST' && p === '/volumes/create') { volumes.set(json.Name, { Name: json.Name, Driver: 'local', CreatedAt: new Date().toISOString(), Labels: {} }); return send(201, volumes.get(json.Name)); }
       if ((m = p.match(/^\/volumes\/([^/]+)$/)) && req.method === 'DELETE') { if (!volumes.delete(m[1])) return err(404, 'no such volume'); return send(204); }
       if (req.method === 'GET' && p === '/system/df') return send(200, { Volumes: [...volumes.values()].map((v) => ({ Name: v.Name, UsageData: { Size: 1234, RefCount: 0 } })) });

@@ -21,6 +21,7 @@ import { createServers } from './servers.js';
 import { createStacks } from './stacks.js';
 import { createTerminal } from './terminal.js';
 import { createApps } from './apps.js';
+import { createContainerTools } from './containertools.js';
 import { createDomains } from './domains.js';
 import { createSshKeys } from './sshkeys.js';
 import { createUsers } from './users.js';
@@ -33,6 +34,12 @@ import { createNodes } from './nodes.js';
 import { createSshConsole } from './sshconsole.js';
 import { createNetTests } from './nettests.js';
 import { createFleetOps } from './fleetops.js';
+import { createDatabases } from './databases.js';
+import { createSecurity } from './security.js';
+import { createTwoFactor, enforceTwoFactor, loginTickets, twoFactorOn, mustSetup } from './twofactor.js';
+import { createMaster } from './master.js';
+import { createBilling } from './billing.js';
+import { changeState } from './lxd.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -217,8 +224,14 @@ const backups = createBackups({
 const network = createNetwork({ io });
 const terminal = createTerminal({ containers });
 const stacks = createStacks({ containers, backupCoverage: (name) => backups.coverage(name) });
-const servers = createServers({ io, containers, allocator, stacks });
+// Billing stops a user's servers/databases when the wallet stays empty past the grace period (never deletes)
+const billing = createBilling({
+  stopServer: async (name) => { if (containers.snapshot(name)?.status === 'Running') await changeState(name, 'stop', () => {}, { force: true }); },
+  stopDatabase: (name) => databasesMod.stopByName(name),
+});
+const servers = createServers({ io, containers, allocator, stacks, billing });
 const appsMod = createApps({ io, containers });
+const containerTools = createContainerTools({ containers });
 const domains = createDomains({ containers, monitoring });
 const sshKeys = createSshKeys({ containers });
 // VPS fleet: nodes + agents, SSH console, network diagnostics, PM2/Docker on every node
@@ -226,6 +239,12 @@ const nodes = createNodes({ io, monitoring });
 const sshConsole = createSshConsole();
 const netTests = createNetTests({ io, nodes, monitoring });
 const fleetOps = createFleetOps({ nodes });
+const databasesMod = createDatabases({ billing });
+const securityMod = createSecurity();
+const master = createMaster({ sshConsole, nodes });
+// Disconnects a user's live sockets (all of them, or all but one session)
+const kickUser = (userId, exceptHash = null) => (exceptHash ? io.in(`user:${userId}`).except(`sess:${exceptHash}`) : io.in(`user:${userId}`)).disconnectSockets(true);
+const twoFactor = createTwoFactor({ kickUser });
 const usersMod = createUsers({ io, containers, terminal: { closeForUser: (id, why) => { terminal.closeForUser(id, why); sshConsole.closeForUser(id, why); } } });
 // Host infrastructure (the VPS itself): PM2, Docker, replicated apps behind Nginx
 const DATA_DIR = path.dirname(process.env.DB_PATH || path.join(__dirname, 'data', 'panel.db'));
@@ -338,11 +357,39 @@ app.post('/api/login', async (req, res) => {
     return res.status(403).json({ error: 'This account is suspended. Contact the administrator.' });
   }
 
+  if (twoFactorOn(user.id)) {
+    audit.log({ username: user.username, ip, action: 'login_password', result: 'success', detail: 'waiting for two-factor code' });
+    return res.json({ twoFactor: true, ticket: loginTickets.issue(user.id, ip) });
+  }
+  return finishLogin(req, res, user, ip);
+});
+
+function finishLogin(req, res, user, ip, detail = null) {
   if (req.session) endSession(res, req.session.token_hash); // never reuse a session across logins
   startSession(res, user.id, { ip, userAgent: req.get('user-agent') });
   users.markLogin(user.id, ip);
-  audit.log({ username: user.username, ip, action: 'login', result: 'success' });
+  audit.log({ username: user.username, ip, action: 'login', result: 'success', detail });
   return res.json({ ok: true });
+}
+
+// Second login step: the 6-digit code (or a recovery code) for the ticket from /api/login
+app.post('/api/login/2fa', (req, res) => {
+  const ip = clientIp(req);
+  const wait = loginLimit.retryAfter(ip);
+  if (wait) {
+    res.set('Retry-After', String(wait));
+    return res.status(429).json({ error: `Too many failed logins. Try again in ${Math.ceil(wait / 60)} minutes.` });
+  }
+  try {
+    const { userId, method } = loginTickets.redeem(req.body?.ticket, req.body?.code, ip);
+    const user = users.byId(userId);
+    if (!user || user.status !== 'active') return res.status(403).json({ error: 'This account is suspended. Contact the administrator.' });
+    return finishLogin(req, res, user, ip, method === 'recovery' ? 'two-factor (recovery code)' : 'two-factor');
+  } catch (e) {
+    const u = e.userId ? users.byId(e.userId) : null;
+    audit.log({ username: u?.username || null, ip, action: 'login', result: 'failure', detail: `two-factor: ${e.message}` });
+    return res.status(e.status || 400).json({ error: e.message });
+  }
 });
 
 app.post('/api/logout', (req, res) => {
@@ -363,6 +410,7 @@ app.get('/login', (req, res, next) => (req.session ? res.redirect(302, '/') : se
 app.use('/assets', express.static(path.join(dist, 'assets'), { immutable: true, maxAge: '1y', fallthrough: false }));
 
 app.use(requireAuth);
+app.use(enforceTwoFactor);
 
 // ---------- account ----------
 app.get('/api/me', (req, res) => {
@@ -372,6 +420,7 @@ app.get('/api/me', (req, res) => {
   res.json({
     id: s.id, username: s.username, role: s.role, isAdmin: isAdmin(s), containers: s.containers, csrf: s.csrf,
     fullName: u?.full_name || null, email: u?.email || null, lastLoginAt: u?.last_login_at || null,
+    twoFactor: twoFactorOn(s.id), mustSetup2fa: mustSetup(s),
     // kept for older frontends
     container: s.role === 'user' ? s.containers[0] || null : null,
   });
@@ -427,6 +476,7 @@ app.use('/api', servers.router);
 app.use('/api', stacks.router);
 app.use('/api', usersMod.router);
 app.use('/api', appsMod.router);
+app.use('/api', containerTools.router);
 app.use('/api', domains.router);
 app.use('/api', sshKeys.router);
 app.use('/api', monitoring.router);
@@ -440,6 +490,11 @@ app.use('/api', nodes.router);
 app.use('/api', sshConsole.router);
 app.use('/api', netTests.router);
 app.use('/api', fleetOps.router);
+app.use('/api', twoFactor.router);
+app.use('/api', master.router);
+app.use('/api/databases', databasesMod.router);
+app.use('/api', billing.router);
+app.use('/api/security', securityMod.router);
 app.get('/api/terminals', requireAdmin, (_req, res) => res.json({ terminals: terminal.list() }));
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
@@ -469,6 +524,8 @@ io.on('connection', (socket) => {
   const s = socket.data.session;
   const ip = (typeof socket.handshake.headers['cf-connecting-ip'] === 'string' && socket.handshake.headers['cf-connecting-ip'].slice(0, 64)) || socket.handshake.address;
   socket.join([`sess:${s.token_hash}`, `user:${s.id}`]);
+  // An admin who still has to set up two-factor login gets no live data, terminals or consoles
+  if (mustSetup(s)) return;
   if (isAdmin(s)) {
     socket.join('admin');
     socket.emit('init', snapshot());
@@ -495,14 +552,24 @@ server.listen(PORT, HOST, () => {
   if (!users.list().length) console.log('No users yet. Create the first admin with: node scripts/create-user.js');
 });
 loop();
-containers.start();
+
+// A staging copy next to the real panel must not run backup helpers, repair Cloudflare routes or health-check
+// apps: the real panel already does. Reading LXD is different, because the server list, the "name is taken" check
+// and every per-server page depend on it, and without the loop the list is empty after each restart.
+const STAGING = process.env.STAGING_MODE === '1';
+// Backup polling only reads the helper's job files (the systemd timer runs the backups), so staging
+// does it too: otherwise its Backups page never sees runs finish and stays on "Starting…".
 backups.start();
-monitoring.start();
-domains.start();
-replicas.start();
-nodes.start();
-netTests.start();
-if (process.env.BACKUP_DISK_CHECK !== 'off') {
+containers.start();
+if (!STAGING) {
+  monitoring.start();
+  domains.start();
+  replicas.start();
+  nodes.start();
+  netTests.start();
+  billing.startLoop();
+}
+if (!STAGING && process.env.BACKUP_DISK_CHECK !== 'off') {
   const diskLoop = () => checkBackupDisk().finally(() => setTimeout(diskLoop, BACKUP_DISK_CHECK_MS).unref());
   setTimeout(diskLoop, 20_000).unref();
 }

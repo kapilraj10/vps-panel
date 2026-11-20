@@ -4,6 +4,7 @@
 > Architecture, migration, deployment and rollback: **[docs/KAPIL_CLOUD.md](docs/KAPIL_CLOUD.md)**.
 > Tests: `cd backend && npm test`. The sections below (setup, backups) still apply.
 > **Purano version hatayera naya deploy garne (same port, same domain): [docs/UPGRADE.md](docs/UPGRADE.md).**
+> Databases, host terminal, firewall, fail2ban, 2FA: [docs/PLATFORM.md](docs/PLATFORM.md).
 
 Server ko CPU, RAM, disk, network, temperature, busiest processes, ra apps ma kati request aayo bhanne kura live herne panel.
 

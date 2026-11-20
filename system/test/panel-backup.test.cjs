@@ -13,7 +13,7 @@ test('defaults are valid and match the spec', () => {
   const c = h.normalizeConfig({});
   assert.deepEqual(c, h.DEFAULTS);
   assert.equal(c.optimizedStorage, false);
-  assert.deepEqual(c.retention, { daily: 7, weekly: 4, monthly: 3 });
+  assert.deepEqual(c.retention, { hourly: 24, daily: 7, weekly: 4, monthly: 3 });
   assert.equal(h.onCalendar(c.schedule), '*-*-* 02:30:00 Asia/Kathmandu');
 });
 
@@ -110,6 +110,48 @@ test('retention keeps 7 daily, 4 weekly and 3 monthly', () => {
   assert.ok(keep.length <= 7 + 4 + 3);
 });
 
+test('hourly schedule runs at the chosen minute of every hour', () => {
+  const c = h.normalizeConfig({ schedule: { every: 'hour', time: '00:15' } });
+  assert.equal(c.schedule.every, 'hour');
+  assert.equal(h.onCalendar(c.schedule), '*-*-* *:15:00 Asia/Kathmandu');
+  assert.equal(h.onCalendar(h.normalizeConfig({ schedule: { every: 'day', time: '03:45' } }).schedule), '*-*-* 03:45:00 Asia/Kathmandu');
+  for (const every of ['minute', 'week', '', 1, null]) {
+    assert.throws(() => h.normalizeConfig({ schedule: { every } }), undefined, String(every));
+  }
+  for (const hourly of [-1, 169, 1.5, '24']) {
+    assert.throws(() => h.normalizeConfig({ retention: { hourly } }), undefined, String(hourly));
+  }
+});
+
+test('settings from an older panel keep the saved hourly schedule and retention', () => {
+  const current = h.normalizeConfig({ schedule: { every: 'hour' }, retention: { hourly: 48 } });
+  const old = { schedule: { enabled: true, time: '02:30', timezone: 'Asia/Kathmandu' }, retention: { daily: 5, weekly: 4, monthly: 3 } };
+  const c = h.normalizeConfig(h.keepNewerKeys(old, current));
+  assert.equal(c.schedule.every, 'hour');
+  assert.equal(c.retention.hourly, 48);
+  assert.equal(c.retention.daily, 5);
+  // An explicit value from a newer panel wins
+  const n = h.normalizeConfig(h.keepNewerKeys({ schedule: { every: 'day' }, retention: { hourly: 0 } }, current));
+  assert.equal(n.schedule.every, 'day');
+  assert.equal(n.retention.hourly, 0);
+  assert.equal(h.keepNewerKeys('not an object', current), 'not an object');
+});
+
+test('hourly retention keeps the newest run of each of the last N hours', () => {
+  const ids = [];
+  for (let d = 6; d <= 8; d += 1) for (let hr = 0; hr < 24; hr += 1) ids.push(`202610${String(d).padStart(2, '0')}-${String(hr).padStart(2, '0')}0000`);
+  ids.push('20261008-233000'); // two runs in the newest hour
+  const { keep, remove } = h.planRetention(ids, { hourly: 24, daily: 3, weekly: 0, monthly: 0 });
+  assert.ok(keep.includes('20261008-233000'));
+  assert.ok(remove.includes('20261008-230000'));
+  for (let hr = 0; hr < 23; hr += 1) assert.ok(keep.includes(`20261008-${String(hr).padStart(2, '0')}0000`), `hour ${hr}`);
+  assert.ok(keep.includes('20261007-230000') && keep.includes('20261006-230000')); // newest of each earlier day
+  assert.ok(remove.includes('20261007-120000'));
+  assert.equal(keep.length, 24 + 2);
+  // Without an hourly setting (old callers) nothing changes
+  assert.deepEqual(h.planRetention(ids, { daily: 1, weekly: 0, monthly: 0 }).keep, ['20261008-233000']);
+});
+
 test('retention keeps the newest of several runs on one day', () => {
   const { keep, remove } = h.planRetention(['20261008-023000', '20261008-140000', '20261007-023000'], { daily: 2, weekly: 0, monthly: 0 });
   assert.deepEqual(keep, ['20261008-140000', '20261007-023000']);
@@ -177,4 +219,19 @@ test('commands other than dry run require root', { skip: process.getuid() === 0 
   const r = run('get-config');
   assert.equal(r.status, 1);
   assert.match(r.stderr, /must run as root/);
+});
+
+test('databases inside LXD servers are found and named after the server', () => {
+  const raw = [
+    JSON.stringify({ ID: 'a'.repeat(64), Image: 'postgres:17-alpine', Names: 'kc-db-shop' }),
+    JSON.stringify({ ID: 'b'.repeat(64), Image: 'nginx:alpine', Names: 'web' }),
+    'not json',
+    JSON.stringify({ ID: 'c'.repeat(64), Image: 'mongo:8', Names: 'bad name;rm' }),
+    '',
+  ].join('\n');
+  const dbs = h.parseDockerPs(raw);
+  assert.deepEqual(dbs.map((d) => [d.name, d.kind]), [['kc-db-shop', 'postgres'], ['cccccccccccc', 'mongo']]);
+  assert.equal(h.dumpFileName({ ...dbs[0], lxd: 'web1' }), 'web1--kc-db-shop-postgres.sql.gz');
+  assert.equal(h.dumpFileName(dbs[0]), 'kc-db-shop-postgres.sql.gz');
+  assert.ok(h.DB_FILE_RE.test(h.dumpFileName({ ...dbs[1], lxd: 'web1' })));
 });

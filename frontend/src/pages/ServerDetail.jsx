@@ -6,6 +6,8 @@ import {
   href, go, useApi, useAction, useConfirm,
 } from '../ui.jsx';
 
+import { AccessTab } from './ContainerTools.jsx';
+
 const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
 const RANGES = [['1h', '1 hour'], ['6h', '6 hours'], ['24h', '24 hours'], ['7d', '7 days']];
@@ -330,6 +332,24 @@ function SettingsTab({ c, d, reload, busy }) {
   );
 }
 
+// A user's own self-service server: deleting it ends its billing
+function UserDeleteCard({ c, busy }) {
+  const run = useAction();
+  const confirm = useConfirm();
+  const del = async () => {
+    const typed = await confirm({ title: `Delete ${c.name}?`, typed: c.name, danger: true, confirmLabel: 'Delete forever', body: <p>The server, its disk and its snapshots are deleted and billing for it stops. This cannot be undone. Remove its domains first.</p> });
+    if (typed && await run(() => api(`/api/containers/${c.name}`, { method: 'DELETE', body: { confirm: typed, stopFirst: true } }), `Deleting ${c.name}`)) setTimeout(() => go('servers'), 1500);
+  };
+  return (
+    <Card title="Danger zone" className="danger" sub="You created this server from a plan, so you can delete it.">
+      <div className="danger__row">
+        <div><strong>Delete server</strong><p className="muted small">Stops the charges for it. Download anything you need first.</p></div>
+        <button type="button" className="btn btn--danger" disabled={busy} onClick={del}><Icon name="trash" size={14} /> Delete</button>
+      </div>
+    </Card>
+  );
+}
+
 const STACK_LABELS = { pm2: 'Node.js + PM2', docker: 'Docker + Compose', cloudflared: 'Cloudflare Tunnel (cloudflared)' };
 
 function StackTab({ c, busy }) {
@@ -417,8 +437,10 @@ export default function ServerDetail({ name, tab }) {
   }
 
   const admin = me.isAdmin;
-  const tabs = [['overview', 'Overview'], ['snapshots', 'Snapshots'], ['apps', 'Apps'], ['logs', 'Logs']];
+  const tabs = [['overview', 'Overview'], ['snapshots', 'Snapshots'], ['apps', 'Apps'], ['access', 'Access'], ['logs', 'Logs']];
   if (admin) tabs.push(['resources', 'Resources'], ['stack', 'Stack'], ['settings', 'Settings']);
+  const selfMade = !admin && d?.meta?.origin === 'panel' && d?.meta?.createdBy === me.username;
+  if (selfMade) tabs.push(['settings', 'Settings']);
   const current = tabs.some(([id]) => id === tab) ? tab : 'overview';
 
   return (
@@ -433,10 +455,12 @@ export default function ServerDetail({ name, tab }) {
       {current === 'overview' && <OverviewTab c={c} d={d} admin={admin} />}
       {current === 'snapshots' && <SnapshotsTab c={c} d={d} reload={reload} busy={busy} />}
       {current === 'apps' && <AppsTab c={c} />}
+      {current === 'access' && <AccessTab c={c} />}
       {current === 'logs' && <LogsTab c={c} admin={admin} />}
       {current === 'resources' && admin && <ResourcesTab c={c} busy={busy} />}
       {current === 'stack' && admin && <StackTab c={c} busy={busy} />}
       {current === 'settings' && admin && <SettingsTab c={c} d={d} reload={reload} busy={busy} />}
+      {current === 'settings' && selfMade && <UserDeleteCard c={c} busy={busy} />}
     </>
   );
 }

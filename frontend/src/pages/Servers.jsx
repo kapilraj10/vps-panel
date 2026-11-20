@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api, Dialog } from '../lib.jsx';
 import { useLive } from '../live.js';
-import { PageHeader, Card, Empty, Icon, Field, Note, useToast, go } from '../ui.jsx';
+import { PageHeader, Card, Empty, Icon, Field, Note, useToast, go, href, useApi } from '../ui.jsx';
+import { fmtMoney } from './Billing.jsx';
 import { ServerRow } from './Overview.jsx';
 
 const blank = { name: '', image: 'ubuntu-24.04', cpu: 1, memoryMiB: 1024, diskGiB: 20, ownerId: '', ip: '', ingressMbit: '', egressMbit: '', start: true, count: 1 };
@@ -128,6 +129,64 @@ export function CreateServer({ open, onClose }) {
   );
 }
 
+// Users: pick a plan; the price is charged by the hour from their prepaid wallet
+export function UserCreateServer({ open, onClose }) {
+  const toast = useToast();
+  const plans = useApi(open ? '/api/billing/plans?kind=server' : null);
+  const wallet = useApi(open ? '/api/billing/me' : null);
+  const [images, setImages] = useState([]);
+  const [f, setF] = useState({ name: '', image: 'ubuntu-24.04', planId: '' });
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { if (open) api('/api/images').then((d) => setImages(d.images)).catch(() => {}); }, [open]);
+  const list = plans.data?.plans || [];
+  const cur = plans.data?.currency;
+  const pick = list.find((p) => String(p.id) === String(f.planId));
+  const w = wallet.data?.wallet;
+  async function submit(e) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api('/api/containers', { method: 'POST', body: { name: f.name, image: f.image, planId: Number(f.planId) } });
+      toast.info(`Creating ${f.name}. It is charged from your wallet while it exists.`);
+      onClose();
+      go(`servers/${f.name}`);
+    } catch (err) { toast.err(err.message); } finally { setBusy(false); }
+  }
+  return (
+    <Dialog open={open} title="New server" onClose={onClose} wide>
+      <form className="form" onSubmit={submit}>
+        {!list.length && plans.data && <Note tone="warn">No plans are available yet. Ask the administrator.</Note>}
+        <div className="plan-grid">
+          {list.map((p) => (
+            <label key={p.id} className={`plan-card ${String(f.planId) === String(p.id) ? 'is-on' : ''}`}>
+              <input type="radio" name="plan" value={p.id} checked={String(f.planId) === String(p.id)} onChange={(e) => setF({ ...f, planId: e.target.value })} />
+              <strong>{p.name}</strong>
+              <span>{p.cpu} CPU · {p.memoryMb >= 1024 ? `${p.memoryMb / 1024} GB` : `${p.memoryMb} MB`} RAM · {p.diskGb} GB disk</span>
+              <span className="plan-card__price">{fmtMoney(p.priceDay, cur)}<small>/day</small></span>
+              <small className="muted">≈ {fmtMoney(p.priceDay * 30, cur)} / 30 days</small>
+              {p.description && <small className="muted">{p.description}</small>}
+            </label>
+          ))}
+        </div>
+        <div className="fgrid">
+          <Field label="Name (also the hostname)" hint="Lowercase letters, digits and dashes">
+            <input required value={f.name} onChange={(e) => setF({ ...f, name: e.target.value.toLowerCase() })} pattern="[a-z][a-z0-9\-]{0,61}[a-z0-9]" autoComplete="off" spellCheck={false} />
+          </Field>
+          <Field label="Operating system">
+            <select value={f.image} onChange={(e) => setF({ ...f, image: e.target.value })}>{images.map((i) => <option key={i.id} value={i.id}>{i.label}</option>)}</select>
+          </Field>
+        </div>
+        {w && <Note tone={pick && w.balance < (w.burnPerDay + pick.priceDay) ? 'warn' : 'info'}>Wallet: {fmtMoney(w.balance, cur)}, you spend {fmtMoney(w.burnPerDay, cur)}/day now{pick ? `, ${fmtMoney(w.burnPerDay + pick.priceDay, cur)}/day with this server` : ''}. <a href={href('wallet')}>Wallet</a></Note>}
+        <p className="muted small">You get root access through the terminal and SSH. Delete the server from its Settings tab to stop paying for it.</p>
+        <div className="dialog__buttons">
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn btn--primary" disabled={busy || !pick}>{busy ? 'Creating…' : pick ? `Create for ${fmtMoney(pick.priceDay, cur)}/day` : 'Pick a plan'}</button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
 export default function Servers() {
   const { me, cts, jobs } = useLive();
   const [q, setQ] = useState('');
@@ -142,7 +201,7 @@ export default function Servers() {
   return (
     <>
       <PageHeader title={me.isAdmin ? 'Servers' : 'My servers'} sub={me.isAdmin ? 'Every LXD container on the master server' : 'Servers assigned to you'}
-        actions={me.isAdmin && <button type="button" className="btn btn--primary" onClick={() => setCreating(true)}><Icon name="plus" size={16} /> Create server</button>} />
+        actions={<button type="button" className="btn btn--primary" onClick={() => setCreating(true)}><Icon name="plus" size={16} /> {me.isAdmin ? 'Create server' : 'New server'}</button>} />
       <div className="filters">
         <div className="input-icon"><Icon name="search" size={16} /><input placeholder="Filter by name, IP or owner" value={q} onChange={(e) => setQ(e.target.value)} /></div>
         <div className="seg">
@@ -152,10 +211,11 @@ export default function Servers() {
       <Card pad={false}>
         {list.length ? list.map((c) => <ServerRow key={c.name} c={c} job={jobs[c.name]} />)
           : <Empty icon="server" title={Object.keys(cts).length ? 'No servers match the filter' : 'No servers yet'}>
-            {me.isAdmin ? 'Create a server to get started.' : 'Ask the administrator to assign a server to you.'}
+            {me.isAdmin ? 'Create a server to get started.' : 'Click "New server" and pick a plan, or ask the administrator to assign one to you.'}
           </Empty>}
       </Card>
       {me.isAdmin && <CreateServer open={creating} onClose={() => { setCreating(false); if (window.location.hash.includes('?new')) go('servers'); }} />}
+      {!me.isAdmin && <UserCreateServer open={creating} onClose={() => { setCreating(false); if (window.location.hash.includes('?new')) go('servers'); }} />}
     </>
   );
 }

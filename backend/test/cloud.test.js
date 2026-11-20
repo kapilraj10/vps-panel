@@ -185,10 +185,12 @@ test('a user sees only their own servers', async () => {
 
 test('users cannot reach admin APIs', async () => {
   for (const [m, u] of [['GET', '/api/users'], ['GET', '/api/allocation'], ['GET', '/api/audit'], ['GET', '/api/backups'], ['GET', '/api/net/state'],
-    ['GET', '/api/snapshot'], ['POST', '/api/containers'], ['PUT', '/api/settings'], ['GET', '/api/networks'], ['GET', '/api/services']]) {
+    ['GET', '/api/snapshot'], ['PUT', '/api/settings'], ['GET', '/api/networks'], ['GET', '/api/services']]) {
     const r = await animesh.req(m, u, m === 'GET' ? undefined : {});
     assert.equal(r.status, 403, `${m} ${u} should be 403, got ${r.status}`);
   }
+  // Users may create servers only from a plan (self-service billing)
+  assert.equal((await animesh.post('/api/containers', { name: 'x1', image: 'ubuntu-24.04', cpu: 1, memoryMiB: 256, diskGiB: 5 })).status, 400);
 });
 
 test('users cannot freeze, resize, rebuild or delete even their own server', async () => {
@@ -525,6 +527,122 @@ test('terminal: only own container, data flows, open/close audited', async () =>
   assert.ok(a.some((e) => e.action === 'terminal_open' && e.result === 'success'));
   assert.ok(a.some((e) => e.action === 'terminal_open' && e.result === 'success' && e.username === 'animesh'));
   assert.ok(a.some((e) => e.action === 'terminal_close'));
+});
+
+test('terminal stays open past an expired LXD wait, and its first output is not lost', async () => {
+  const s = await socketFor(animesh);
+  const got = [];
+  s.on('term:data', (m) => got.push(Buffer.from(m.data).toString()));
+  let exited = null;
+  s.on('term:exit', (m) => { exited = m; });
+  const r = await emitAck(s, 'term:open', { container: 'animesh', cols: 80, rows: 24 });
+  assert.ok(r.id, JSON.stringify(r));
+  await sleep(4500);
+  assert.equal(exited, null);
+  assert.ok(got.join('').includes('fake-shell$'));
+  s.emit('term:close', { id: r.id });
+  await sleep(100);
+  s.close();
+});
+
+test('typing exit in the terminal ends the session', async () => {
+  const s = await socketFor(animesh);
+  const exited = new Promise((r) => s.on('term:exit', r));
+  const r = await emitAck(s, 'term:open', { container: 'animesh', cols: 80, rows: 24 });
+  assert.ok(r.id, JSON.stringify(r));
+  s.emit('term:input', { id: r.id, data: 'exit\n' });
+  const m = await Promise.race([exited, sleep(4000).then(() => null)]);
+  assert.equal(m?.reason, 'shell exited');
+  s.close();
+});
+
+test('create asks LXD: a name the cached list has not seen is refused, and its owner is kept', async () => {
+  await admin.put('/api/settings', { cpu_overcommit: 8, memory_overcommit: 2 });
+  const made = await admin.post('/api/users', { username: 'ghostowner', password: PW, role: 'user' });
+  assert.equal(made.status, 201, JSON.stringify(made.data));
+  const ownerId = (await admin.get('/api/users')).data.users.find((u) => u.username === 'ghostowner').id;
+  lxd.addInstance('ghost');
+  const direct = new Database(DB);
+  direct.prepare('INSERT INTO user_containers (user_id, container, assigned_at) VALUES (?, ?, ?)').run(ownerId, 'ghost', Date.now());
+  direct.close();
+  const r = await admin.post('/api/containers', { name: 'ghost', image: 'ubuntu-24.04', cpu: 1, memoryMiB: 256, diskGiB: 10, ownerId, acceptWarnings: true });
+  assert.equal(r.status, 409, JSON.stringify(r.data));
+  assert.match(r.data.error, /already exists/);
+  await sleep(300);
+  const check = new Database(DB, { readonly: true });
+  assert.ok(check.prepare('SELECT 1 FROM user_containers WHERE user_id = ? AND container = ?').get(ownerId, 'ghost'), 'owner kept');
+  check.close();
+});
+
+test('a leftover panel record for a deleted server does not block its name', async () => {
+  const direct = new Database(DB);
+  direct.prepare("INSERT INTO container_meta (name, protected, origin, created_at) VALUES ('orphan', 0, 'panel', ?)").run(Date.now());
+  direct.close();
+  const r = await admin.post('/api/containers', { name: 'orphan', image: 'ubuntu-24.04', cpu: 1, memoryMiB: 256, diskGiB: 10, acceptWarnings: true });
+  assert.equal(r.status, 202, JSON.stringify(r.data));
+  await until(async () => (await admin.get('/api/containers/orphan')).data?.status === 'Running');
+});
+
+test('container tools: owner manages own server, never another', async () => {
+  const owner = animesh;
+  const access = await owner.get('/api/servers/animesh/access');
+  assert.equal(access.status, 200, JSON.stringify(access.data));
+  assert.deepEqual(access.data.accounts.map((a) => a.name), ['root', 'deploy']);
+  assert.equal(access.data.accounts[0].status, 'locked');
+  assert.equal(access.data.ssh.passwordLogin, false);
+
+  const gen = await owner.post('/api/servers/animesh/access/password', { account: 'root', generate: true });
+  assert.equal(gen.status, 200, JSON.stringify(gen.data));
+  assert.ok(gen.data.password.length >= 20);
+  const call = lxd.calls.filter((x) => x.body?.environment?.TOOL_OP === 'set-password').at(-1);
+  assert.equal(call.body.environment.NEW_PASSWORD, gen.data.password);
+  assert.ok(!call.body.command.join(' ').includes(gen.data.password), 'password must not be on the command line');
+
+  assert.equal((await owner.post('/api/servers/animesh/access/password', { account: 'root', password: 'short' })).status, 400);
+  assert.equal((await owner.post('/api/servers/animesh/access/password', { account: 'x; rm -rf /', generate: true })).status, 400);
+  const none = await owner.post('/api/servers/animesh/access/password', { account: 'missing', generate: true });
+  assert.equal(none.status, 400);
+  assert.match(none.data.error, /no account named/);
+  assert.match((await owner.post('/api/servers/animesh/access/password', { account: 'daemon', generate: true })).data.error, /system account/);
+
+  const created = await owner.post('/api/servers/animesh/access/password', { account: 'dev', password: 'a-long-enough-pass-1', create: true, sudo: true });
+  assert.equal(created.data.created, true);
+  assert.equal(created.data.password, undefined);
+
+  assert.equal((await owner.put('/api/servers/animesh/access/ssh', { passwordLogin: true, rootLogin: true })).status, 200);
+  const ssh = lxd.calls.filter((x) => x.body?.environment?.TOOL_OP === 'ssh-password').at(-1);
+  assert.equal(ssh.body.environment.ENABLE, '1');
+  assert.equal(ssh.body.environment.ROOT_LOGIN, '1');
+
+  const pm2 = await owner.get('/api/servers/animesh/tools/pm2');
+  assert.deepEqual(pm2.data.processes.map((p) => [p.name, p.instances, p.cpu, p.mode]), [['web', 2, 5, 'cluster']]);
+  assert.equal((await owner.post('/api/servers/animesh/tools/pm2/web/restart', {})).status, 200);
+  assert.equal((await owner.post('/api/servers/animesh/tools/pm2/web/scale', { instances: 3 })).status, 200);
+  assert.equal((await owner.post('/api/servers/animesh/tools/pm2/web/format', {})).status, 400);
+
+  const docker = await owner.get('/api/servers/animesh/tools/docker');
+  assert.equal(docker.data.state, 'ready');
+  assert.equal(docker.data.containers.find((c) => c.name === 'kc-db-shop').database, 'shop');
+  assert.equal((await owner.post('/api/servers/animesh/tools/docker', { image: 'nginx:alpine', name: 'web2', ports: '8080:80; rm', env: '' })).status, 400);
+
+  const dbs = await owner.get('/api/servers/animesh/tools/databases');
+  assert.deepEqual(dbs.data.databases.map((d) => [d.name, d.engine, d.port]), [['shop', 'postgres', 5432]]);
+  const cred = await owner.get('/api/servers/animesh/tools/databases/shop/credentials');
+  assert.equal(cred.data.url, 'postgresql://app:s3cret@127.0.0.1:5433/shop');
+  const made = await owner.post('/api/servers/animesh/tools/databases', { name: 'blog', engine: 'postgres', version: '17' });
+  assert.equal(made.status, 202, JSON.stringify(made.data));
+  await until(async () => (await owner.get('/api/servers/animesh/tools/databases')).data.task?.status === 'success');
+
+  const audit = (await admin.get('/api/audit?q=server_password_change')).data.entries;
+  assert.ok(audit.some((e) => e.target === 'animesh/root' && e.result === 'success'));
+  assert.ok(!JSON.stringify(audit).includes(gen.data.password), 'password must never reach the audit log');
+});
+
+test('container tools: other users get 403', async () => {
+  for (const u of ['/api/servers/animesh/access', '/api/servers/animesh/tools/pm2', '/api/servers/animesh/tools/docker', '/api/servers/animesh/tools/databases']) {
+    assert.equal((await sachin.get(u)).status, 403, u);
+  }
+  assert.equal((await sachin.post('/api/servers/animesh/access/password', { account: 'root', generate: true })).status, 403);
 });
 
 test('terminal refused on privileged containers for users', async () => {

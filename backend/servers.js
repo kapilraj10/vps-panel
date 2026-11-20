@@ -2,7 +2,7 @@
 // that can lose data is admin-only, needs a typed confirmation, and refuses protected containers.
 import express from 'express';
 import net from 'node:net';
-import {
+import { listInstances,
   IMAGES, createInstance, deleteInstance, copyInstance, renameInstance, rebuildInstance, updateInstance,
   listSnapshots, createSnapshot, deleteSnapshot, restoreSnapshot, validSnapshotName, instanceLog, consoleLog,
   getNetwork, networkLeases, hasExtension, getProfile, toMiB, toGiB, changeState,
@@ -11,6 +11,7 @@ import { users, audit, containerMeta, settings, db, NEW_CONTAINER_RE, CONTAINER_
 import { clientIp, isAdmin, ownsContainer, requireAdmin, requireSuperAdmin } from './auth.js';
 import { wrap, bad, forbidden, notFound, conflict, int, str, MiB, GiB, HttpError } from './http.js';
 import { parseStack, DOCKER_LXD_CONFIG, STACK_COMPONENTS } from './stacks.js';
+import { plans } from './billing.js';
 
 const MAX_REPLICAS = 5;
 
@@ -29,7 +30,7 @@ function inSubnet(ip, cidr) {
   return n > start && n < start + size - 1; // not the network or broadcast address
 }
 
-export function createServers({ io, containers, allocator, stacks = null }) {
+export function createServers({ io, containers, allocator, stacks = null, billing = null }) {
   const router = express.Router();
   const who = (req) => ({ username: req.session.username, ip: clientIp(req) });
 
@@ -88,6 +89,7 @@ export function createServers({ io, containers, allocator, stacks = null }) {
     const action = req.body?.action;
     const set = isAdmin(req.session) ? ADMIN_ACTIONS : USER_ACTIONS;
     if (!set.has(action)) throw bad(`action must be one of: ${[...set].join(', ')}`);
+    if (['start', 'restart', 'unfreeze'].includes(action)) billing?.assertCanRun(req.session);
     notBusy(name);
     res.status(202).json(job(req, name, action, null));
   }));
@@ -239,15 +241,35 @@ export function createServers({ io, containers, allocator, stacks = null }) {
 
   // ---------- create ----------
   // count > 1 creates identical replicas name-1..name-N. `stack` (super admin) installs PM2/Docker/cloudflared inside.
-  router.post('/containers', requireAdmin, wrap(async (req, res) => {
-    const b = req.body ?? {};
+  // Users (self-service) must pick an active server plan; it sets the size and the daily price, and they own the server.
+  router.post('/containers', wrap(async (req, res) => {
+    const self = !isAdmin(req.session);
+    const b = { ...(req.body ?? {}) };
+    let plan = null;
+    if (b.planId !== undefined && b.planId !== null && b.planId !== '') {
+      plan = plans.get(int(b.planId, { min: 1, max: 1e9, name: 'Plan' }));
+      if (!plan || plan.kind !== 'server' || (self && !plan.active)) throw bad('Pick an available server plan');
+      Object.assign(b, { cpu: plan.cpu, memoryMiB: plan.memory_mb, diskGiB: plan.disk_gb });
+    }
+    if (self) {
+      if (!plan) throw bad('Pick a plan');
+      for (const k of ['stack', 'ip', 'pool', 'ingressMbit', 'egressMbit']) delete b[k];
+      b.count = 1;
+      b.start = true;
+      b.ownerId = req.session.id;
+      b.acceptWarnings = false;
+    }
+    const priceDay = plan ? plan.price_day
+      : b.priceDay !== undefined && b.priceDay !== '' ? int(b.priceDay, { min: 0, max: 1e9, name: 'Price per day (paisa)' }) : null;
     const name = str(b.name, { max: 63, name: 'Name' }).toLowerCase();
     if (!NEW_CONTAINER_RE.test(name)) throw bad('Name: 2-63 lowercase letters, digits or dashes, starting with a letter, not ending with a dash');
     const count = b.count == null || b.count === '' ? 1 : int(b.count, { min: 1, max: MAX_REPLICAS, name: 'Number of servers' });
     const names = count === 1 ? [name] : Array.from({ length: count }, (_, i) => `${name}-${i + 1}`);
+    // Ask LXD itself: the cached list can lag behind it, and nothing may change in the panel for a name that is taken
+    const inLxd = new Set((await listInstances()).map((i) => i.name));
     for (const n of names) {
       if (!NEW_CONTAINER_RE.test(n)) throw bad(`${n} is not a valid name (keep the base name shorter)`);
-      if (containers.exists(n) || containerMeta.get(n)) throw conflict(`A server named ${n} already exists`);
+      if (inLxd.has(n) || containers.exists(n) || containers.busy(n)) throw conflict(`A server named ${n} already exists. It may be stopped or hidden from your list; pick another name or delete it first.`);
     }
     if (!IMAGES[b.image]) throw bad('Pick an image');
     const stack = parseStack(b.stack, req.session);
@@ -263,8 +285,12 @@ export function createServers({ io, containers, allocator, stacks = null }) {
     const fixedIp = b.ip ? String(b.ip).trim() : null;
     if (fixedIp && count > 1) throw bad('A fixed IP can only be given to one server. Create replicas with DHCP and set IPs afterwards.');
     const info = fixedIp ? await checkIp(fixedIp) : await nicInfo(null).catch(() => ({}));
+    if (owner && priceDay != null && self) billing?.assertCanAfford(owner.id, priceDay * count);
     const check = await allocator.check({ ...spec, pool: b.pool, forUser: ownerId, count });
     if (!check.ok) return res.status(409).json({ error: check.errors.join(' '), errors: check.errors, warnings: check.warnings });
+    if (self && check.warnings.length) {
+      return res.status(409).json({ error: 'The cloud has no room for this plan right now. Pick a smaller plan or ask the administrator.' });
+    }
     if (check.warnings.length && b.acceptWarnings !== true) {
       return res.status(409).json({ error: 'Review the warnings and confirm', needsConfirm: true, warnings: check.warnings });
     }
@@ -293,17 +319,18 @@ export function createServers({ io, containers, allocator, stacks = null }) {
         ...(count > 1 ? { 'user.kapilcloud.replica-of': name } : {}),
       };
       containerMeta.createdByPanel(n, { image: b.image, by: req.session.username });
-      if (owner) users.assign(owner.id, n);
       return job(req, n, 'create', async (p) => {
         p('Downloading image and creating (first time for an image can take a few minutes)');
         try {
           await createInstance({ name: n, image: b.image, config, devices, description: `Kapil Cloud server${owner ? ` for ${owner.username}` : ''}` },
             (m) => { const d = m.download_progress || m.create_instance_from_image_unpack_progress; if (d) p(d); });
         } catch (err) {
-          if (owner) db.prepare('DELETE FROM user_containers WHERE user_id = ? AND container = ?').run(owner.id, n);
-          containerMeta.remove(n);
+          if (!/already exists/i.test(err.message)) containerMeta.remove(n);
           throw err;
         }
+        if (owner) users.assign(owner.id, n);
+        if (owner && priceDay != null) billing?.start({ userId: owner.id, kind: 'server', name: n, planId: plan?.id ?? null, priceDay, by: req.session.username });
+        if (owner) io.in(`user:${owner.id}`).socketsJoin(`ct:${n}`);
         if (b.start !== false) { p('Starting'); await changeState(n, 'start'); }
         if (!stack) return `Created ${n}`;
         await containers.poll().catch(() => {}); // facts (limits) for the new server
@@ -322,8 +349,13 @@ export function createServers({ io, containers, allocator, stacks = null }) {
   }));
 
   // ---------- delete (super admin) ----------
-  router.delete('/containers/:name', requireSuperAdmin, wrap(async (req, res) => {
+  // Super admins, or the user who made the server themselves from a plan
+  router.delete('/containers/:name', wrap(async (req, res) => {
     const name = allowed(req);
+    if (!isAdmin(req.session) && !(meta(name).origin === 'panel' && meta(name).created_by === req.session.username)) {
+      throw forbidden('Only servers you created yourself can be deleted here. Ask the administrator for this one.');
+    }
+    if (isAdmin(req.session) && req.session.role !== 'super_admin') throw forbidden('Only a super admin can do this');
     confirmName(req.body, name);
     notBusy(name);
     if (meta(name).protected) throw forbidden(`${name} is protected. Remove the protection first (Settings tab of the server).`);
@@ -342,6 +374,7 @@ export function createServers({ io, containers, allocator, stacks = null }) {
         db.prepare('DELETE FROM apps WHERE container = ?').run(name);
         containerMeta.remove(name);
       })();
+      billing?.end('server', name, req.session.username);
       return `Deleted ${name}`;
     }));
   }));
@@ -477,6 +510,7 @@ export function createServers({ io, containers, allocator, stacks = null }) {
         db.prepare('UPDATE apps SET container = ? WHERE container = ?').run(newName, name);
         db.prepare('UPDATE domains SET container = ? WHERE container = ?').run(newName, name);
       })();
+      billing?.rename('server', name, newName);
       return `Renamed to ${newName}. Older backups stay under the old name.`;
     }, `to ${newName}`));
   }));

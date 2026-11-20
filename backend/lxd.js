@@ -73,7 +73,9 @@ export async function waitOperation(res, { timeoutMs = 300_000, onProgress = () 
     try {
       op = (await request('GET', `${p}/wait?timeout=2`, null, { timeout: 10_000 })).metadata;
     } catch (err) {
-      if (err.status === 504) continue;
+      // An expired wait only means "still running". LXD 5.21 reports it as an error body with the message below
+      // (HTTP 200, error_code 500); other versions send 504. Real operation failures arrive in op.err further down.
+      if (err.status === 504 || /context deadline exceeded/i.test(err.message)) continue;
       throw err;
     }
     // 103 Running, 105 Pending, 106 Starting, 107 Stopping, 200 Success, 400 Failure, 401 Cancelled
@@ -283,11 +285,25 @@ export async function execInteractive(name, { command, env = {}, cols = 80, rows
   if (!fds['0'] || !fds.control) throw new LxdError('LXD did not offer the terminal streams');
   const pty = opSocket(p, fds['0']);
   const control = opSocket(p, fds.control);
+  // The shell starts as soon as both sockets connect, so its first output (the prompt) can arrive before the caller
+  // has attached anything. Hold it until onData is called.
+  const early = [];
+  let sink = null;
+  pty.on('message', (data) => {
+    const b = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    // An empty frame is LXD's end-of-stream: the shell has exited, and the operation stays open until we hang up
+    if (!b.length) { try { pty.close(); control.close(); } catch { /* gone */ } return; }
+    if (sink) sink(b); else early.push(b);
+  });
   await Promise.all([opened(pty), opened(control)]);
+  // `opened` only listens while connecting; an unhandled 'error' after that would take the whole panel down
+  pty.on('error', () => {});
+  control.on('error', () => {});
   const done = waitOperation(res, { timeoutMs: 24 * 3600_000 }).then((m) => Number(m?.return ?? 0), () => -1);
   return {
     pty,
     done,
+    onData: (fn) => { sink = fn; for (const b of early.splice(0)) fn(b); },
     write: (data) => { if (pty.readyState === WebSocket.OPEN) pty.send(Buffer.from(data, 'utf8')); },
     resize: (c, r) => {
       if (control.readyState === WebSocket.OPEN) {

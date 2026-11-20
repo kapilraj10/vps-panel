@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Replaces the running panel with this release. Same folder, same PM2 name, same .env (port, secrets),
 # same database, so the Cloudflare route and domain keep working untouched. Run as the panel user, NOT with sudo.
+# A .env set through DOTENV_CONFIG_PATH in PM2, or a DB_PATH outside backend/data, stays where it is.
 #
 #   bash system/upgrade-panel.sh --check      Checks only. Changes nothing.
 #   bash system/upgrade-panel.sh              Upgrade. If the new version is not healthy, the old one comes back by itself.
@@ -8,14 +9,14 @@
 #   bash system/upgrade-panel.sh --cleanup    Delete the kept old versions (after this, --rollback is impossible).
 #
 # Settings (environment): PM2_NAME (vps-panel), APP_DIR (from PM2, else ~/vps-panel), HEALTH_WAIT (60 seconds),
-# PANEL_DOMAIN (panel.gyannportal.com; empty skips the domain check).
+# PANEL_DOMAIN (the panel's public hostname; empty skips the domain check).
 #
 # Touches only the panel: other PM2 apps, containers, Nginx, the firewall and Cloudflare are left alone.
 set -euo pipefail
 
 PM2_NAME="${PM2_NAME:-vps-panel}"
 HEALTH_WAIT="${HEALTH_WAIT:-60}"
-PANEL_DOMAIN="${PANEL_DOMAIN-panel.gyannportal.com}"
+PANEL_DOMAIN="${PANEL_DOMAIN-}"
 RELEASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKUP_ROOT="$HOME/panel-predeploy"
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -35,13 +36,13 @@ case "${1:-}" in
 esac
 
 # ---------- helpers ----------
-# "<cwd>\t<script>" of the PM2 process, empty if PM2 does not know it
+# "<cwd>\t<script>\t<DOTENV_CONFIG_PATH>" of the PM2 process, empty if PM2 does not know it
 pm2_info() {
   pm2 jlist 2>/dev/null | PM2_NAME="$PM2_NAME" node -e '
     let d = ""; process.stdin.on("data", (c) => d += c).on("end", () => {
       const list = JSON.parse(d.slice(d.indexOf("[")) || "[]");
       const p = list.find((x) => x.name === process.env.PM2_NAME);
-      if (p) console.log(`${p.pm2_env.pm_cwd}\t${p.pm2_env.pm_exec_path}`);
+      if (p) console.log(`${p.pm2_env.pm_cwd}\t${p.pm2_env.pm_exec_path}\t${p.pm2_env.DOTENV_CONFIG_PATH || ""}`);
     });' || true
 }
 
@@ -58,12 +59,12 @@ http_code() { curl -s -o /dev/null --max-time 5 -w '%{http_code}' "$1" 2>/dev/nu
 
 load_target() {
   command -v pm2 >/dev/null || die "pm2 not found in PATH"
-  local info cwd script
+  local info cwd script dotenv=""
   info="$(pm2_info)"
   PM2_KNOWN=no
   if [ -n "$info" ]; then
     PM2_KNOWN=yes
-    cwd="${info%%$'\t'*}"; script="${info#*$'\t'}"
+    IFS=$'\t' read -r cwd script dotenv <<< "$info"
     case "$script" in
       */backend/server.js) ;;
       *) die "PM2 app \"$PM2_NAME\" runs $script, expected .../backend/server.js. Set PM2_NAME if the panel has another name." ;;
@@ -74,12 +75,43 @@ load_target() {
   else
     APP_DIR="${APP_DIR:-$HOME/vps-panel}"
   fi
+  ENV_EXTERNAL=no
   ENV_FILE="$APP_DIR/backend/.env"
+  if [ -n "$dotenv" ]; then
+    case "$dotenv" in /*) ;; *) die "DOTENV_CONFIG_PATH of \"$PM2_NAME\" must be an absolute path, got: $dotenv" ;; esac
+    ENV_FILE="$dotenv"; ENV_EXTERNAL=yes
+  fi
   [ -f "$ENV_FILE" ] || die "$ENV_FILE not found. This script upgrades an existing install."
   PORT="$(env_get "$ENV_FILE" PORT)"; PORT="${PORT:-4000}"
   HOST="$(env_get "$ENV_FILE" HOST)"; HOST="${HOST:-127.0.0.1}"
   case "$HOST" in 0.0.0.0|::|'[::]') HOST=127.0.0.1 ;; esac
   URL="http://$HOST:$PORT"
+}
+
+load_db() {
+  DB_EXTERNAL=no
+  DB_DIR="$APP_DIR/backend/data"
+  DB_PATH="$(env_get "$ENV_FILE" DB_PATH)"
+  [ -n "$DB_PATH" ] || return 0
+  case "$DB_PATH" in /*) ;; *) DB_PATH="$APP_DIR/backend/$DB_PATH" ;; esac
+  DB_PATH="$(realpath -m "$DB_PATH")"
+  case "$DB_PATH" in "$DB_DIR"/*) return 0 ;; esac
+  DB_EXTERNAL=yes
+  DB_DIR="$(dirname "$DB_PATH")"
+  # The whole folder is saved and restored, so it must be a folder of its own
+  case "$APP_DIR/" in "$DB_DIR"/*) die "DB_PATH folder $DB_DIR contains the panel. Give the database its own folder." ;; esac
+  case "$HOME/" in "$DB_DIR"/*) die "DB_PATH folder $DB_DIR contains your home folder. Give the database its own folder." ;; esac
+  [ "$DB_DIR" != "$HOME" ] && [ "$DB_DIR" != / ] || die "DB_PATH folder $DB_DIR is too broad. Give the database its own folder."
+}
+
+# Puts back the .env and database that live outside the panel folder, as saved by upgrade <ts>
+restore_external() {
+  local saved="$BACKUP_ROOT/$1"
+  if [ "$ENV_EXTERNAL" = yes ] && [ -f "$saved/env" ]; then cp -p "$saved/env" "$ENV_FILE"; fi
+  if [ "$DB_EXTERNAL" = yes ] && [ -f "$saved/db.tar.gz" ]; then
+    [ ! -e "$DB_DIR" ] || mv "$DB_DIR" "$saved/db-replaced-$TS"
+    tar -xzf "$saved/db.tar.gz" -C "$(dirname "$DB_DIR")"
+  fi
 }
 
 # Kept copies, newest last
@@ -111,6 +143,7 @@ show_log() { echo "--- last lines of the panel log ---"; pm2 logs "$PM2_NAME" --
 restore_old() {
   local old="$1" aside="$2"
   pm2_down || true
+  restore_external "${old##*.old-}"
   [ ! -e "$APP_DIR" ] || mv "$APP_DIR" "$aside"
   mv "$old" "$APP_DIR"
   pm2_up
@@ -140,8 +173,12 @@ fi
 # ---------- rollback ----------
 if [ "$MODE" = rollback ]; then
   load_target
+  load_db
   OLD="$(kept_old | tail -n 1)"
   [ -n "$OLD" ] || die "No old version kept next to $APP_DIR, nothing to roll back to."
+  if [ "$DB_EXTERNAL" = yes ] && [ ! -f "$BACKUP_ROOT/${OLD##*.old-}/db.tar.gz" ]; then
+    die "The saved database $BACKUP_ROOT/${OLD##*.old-}/db.tar.gz is missing, so the old version cannot get its old database back."
+  fi
   echo "Going back to: $OLD"
   echo "Current folder is kept as: $APP_DIR.rolledback-$TS"
   echo "Note: the old database comes back too. Changes made since that upgrade stay only in the kept folder."
@@ -166,26 +203,17 @@ load_target
 [ -d "$APP_DIR" ] || die "$APP_DIR not found"
 case "$RELEASE_DIR/" in "$APP_DIR"/*) die "Run this from the unpacked release folder, not from inside $APP_DIR." ;; esac
 
-DATA_DIR="$APP_DIR/backend/data"
-DB_PATH="$(env_get "$ENV_FILE" DB_PATH)"
-if [ -n "$DB_PATH" ]; then
-  case "$DB_PATH" in /*) ;; *) DB_PATH="$APP_DIR/backend/$DB_PATH" ;; esac
-  DB_PATH="$(realpath -m "$DB_PATH")"
-  case "$DB_PATH" in
-    "$DATA_DIR"/*) ;;
-    *) die "DB_PATH in .env points outside $DATA_DIR ($DB_PATH). Automatic rollback cannot cover it. Move it into backend/data first." ;;
-  esac
-fi
+load_db
 
 NEED_KB=$(( $(du -sk "$RELEASE_DIR" | cut -f1) + 500000 ))
-[ ! -d "$DATA_DIR" ] || NEED_KB=$(( NEED_KB + 2 * $(du -sk "$DATA_DIR" | cut -f1) ))
+[ ! -d "$DB_DIR" ] || NEED_KB=$(( NEED_KB + 2 * $(du -sk "$DB_DIR" | cut -f1) ))
 FREE_KB="$(df -Pk "$(dirname "$APP_DIR")" | awk 'NR==2 {print $4}')"
 [ "$FREE_KB" -ge "$NEED_KB" ] || die "Not enough disk space: need about $((NEED_KB / 1024)) MB, have $((FREE_KB / 1024)) MB."
 
 OLD_VERSION="$(cat "$APP_DIR/VERSION" 2>/dev/null || git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 NEW_VERSION="$(cat "$RELEASE_DIR/VERSION" 2>/dev/null || echo unknown)"
-printf '  Folder:   %s\n  PM2 app:  %s (%s)\n  Address:  %s (from .env)\n  Version:  %s -> %s\n  Answering now: HTTP %s\n' \
-  "$APP_DIR" "$PM2_NAME" "$([ "$PM2_KNOWN" = yes ] && echo found || echo 'not in PM2, will be added')" \
+printf '  Folder:   %s\n  Settings: %s\n  Database: %s\n  PM2 app:  %s (%s)\n  Address:  %s (from .env)\n  Version:  %s -> %s\n  Answering now: HTTP %s\n' \
+  "$APP_DIR" "$ENV_FILE" "$DB_DIR" "$PM2_NAME" "$([ "$PM2_KNOWN" = yes ] && echo found || echo 'not in PM2, will be added')" \
   "$URL" "$OLD_VERSION" "$NEW_VERSION" "$(http_code "$URL/login")"
 if [ -d "$APP_DIR/.git" ] && [ -n "$(git -C "$APP_DIR" status --porcelain 2>/dev/null)" ]; then
   warn "the server copy has local edits. They will NOT be in the new version (the old folder keeps them):"
@@ -241,24 +269,26 @@ fi
 say "Saving .env and database to $BACKUP_ROOT/$TS"
 ( umask 077
   mkdir -p "$BACKUP_ROOT/$TS"
-  if [ -d "$DATA_DIR" ]; then tar -czf "$BACKUP_ROOT/$TS/env-and-data.tar.gz" -C "$APP_DIR/backend" .env data
-  else tar -czf "$BACKUP_ROOT/$TS/env-and-data.tar.gz" -C "$APP_DIR/backend" .env; fi
+  cp -p "$ENV_FILE" "$BACKUP_ROOT/$TS/env"
+  [ ! -d "$DB_DIR" ] || tar -czf "$BACKUP_ROOT/$TS/db.tar.gz" -C "$(dirname "$DB_DIR")" "$(basename "$DB_DIR")"
   echo "$OLD_VERSION" > "$BACKUP_ROOT/$TS/old-version"
 )
 chmod 700 "$BACKUP_ROOT"
 
 say "Copying .env and database into the new version"
-cp -p "$ENV_FILE" "$STAGING/backend/.env"
-[ ! -d "$DATA_DIR" ] || cp -a "$DATA_DIR" "$STAGING/backend/data"
-chmod 600 "$STAGING/backend/.env"
+NEW_ENV="$ENV_FILE"
+if [ "$ENV_EXTERNAL" = no ]; then
+  NEW_ENV="$STAGING/backend/.env"
+  cp -p "$ENV_FILE" "$NEW_ENV"
+  chmod 600 "$NEW_ENV"
+fi
+if [ "$DB_EXTERNAL" = no ] && [ -d "$DB_DIR" ]; then cp -a "$DB_DIR" "$STAGING/backend/data"; fi
 
-NEW_ENV="$STAGING/backend/.env"
 [ -n "$(env_get "$NEW_ENV" SESSION_SECRET)" ] || { env_set "$NEW_ENV" SESSION_SECRET "$(openssl rand -hex 32)"; echo "Added SESSION_SECRET to .env"; }
 if [ -z "$(env_get "$NEW_ENV" SECRETS_KEY)" ]; then
   # A database that already ran Kapil Cloud may hold secrets sealed with the key derived from SESSION_SECRET.
   # A new key would make those unreadable, so only add one before the first Kapil Cloud start.
-  DB_FILE="${DB_PATH:-$DATA_DIR/panel.db}"
-  DB_FILE="$STAGING/backend/data/${DB_FILE#"$DATA_DIR"/}"
+  DB_FILE="${DB_PATH:-$DB_DIR/panel.db}"
   ALREADY="$(cd "$STAGING/backend" && DB_FILE="$DB_FILE" node -e '
     const fs = require("fs");
     if (!fs.existsSync(process.env.DB_FILE)) { console.log("no"); process.exit(0); }
@@ -288,8 +318,8 @@ HEALTH="$(curl -s --max-time 5 "$URL/healthz" || true)"
 echo "  Health: $HEALTH"
 case "$HEALTH" in *'"lxd":false'*) warn "the panel cannot reach LXD yet. Check group membership: id | grep lxd (then: sudo systemctl restart pm2-$USER)" ;; esac
 
-USERS="$(cd "$APP_DIR/backend" && node -e '
-  const d = new (require("better-sqlite3"))(process.env.DB_PATH || "data/panel.db", { readonly: true });
+USERS="$(cd "$APP_DIR/backend" && DB_FILE="${DB_PATH:-$DB_DIR/panel.db}" node -e '
+  const d = new (require("better-sqlite3"))(process.env.DB_FILE, { readonly: true });
   console.log(d.prepare("SELECT COUNT(*) n FROM users").get().n);' 2>/dev/null || echo "?")"
 [ "$USERS" != 0 ] || warn "there are no users yet. Create one: cd $APP_DIR/backend && node scripts/create-user.js"
 
@@ -317,7 +347,7 @@ cat <<EOF
 
 Old version is no longer running. It is kept for rollback at: $OLD_KEPT
 Log in and check the panel, then delete the old version:
-  bash $APP_DIR/system/upgrade-panel.sh --cleanup
+  PM2_NAME=$PM2_NAME bash $APP_DIR/system/upgrade-panel.sh --cleanup
 Problem? Go back:
-  bash $APP_DIR/system/upgrade-panel.sh --rollback
+  PM2_NAME=$PM2_NAME bash $APP_DIR/system/upgrade-panel.sh --rollback
 EOF
