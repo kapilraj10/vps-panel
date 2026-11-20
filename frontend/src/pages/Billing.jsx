@@ -34,7 +34,7 @@ function ResourceTable({ list, cur, onEnd }) {
     <div className="table-wrap"><table className="table">
       <thead><tr><th>Resource</th><th>Plan</th><th className="num">Per day</th><th className="num">Per month (30 d)</th><th>Since</th><th className="num">Charged</th>{onEnd && <th />}</tr></thead>
       <tbody>{list.map((r) => (
-        <tr key={r.id}><td><Icon name={r.kind === 'server' ? 'server' : 'disk'} size={14} /> <strong>{r.name}</strong> {r.paused && <Badge tone="bad">paused</Badge>}</td>
+        <tr key={r.id}><td><Icon name={{ server: 'server', app: 'app' }[r.kind] || 'disk'} size={14} /> <strong>{r.name}</strong> {r.paused && <Badge tone="bad">paused</Badge>}</td>
           <td className="muted">{r.planName || 'custom price'}</td><td className="num">{fmtMoney(r.priceDay, cur)}</td><td className="num muted">{fmtMoney(r.priceDay * 30, cur)}</td>
           <td className="muted">{ago(r.startedAt)}</td><td className="num">{fmtMoney(r.charged, cur)}</td>
           {onEnd && <td><button type="button" className="btn btn--small" onClick={() => onEnd(r)}>Stop billing</button></td>}</tr>
@@ -78,8 +78,8 @@ function PlanTable({ plans, cur, onEdit, onDelete }) {
       <thead><tr><th>Plan</th><th>Kind</th><th>Size</th><th className="num">Per day</th><th className="num">Per month (30 d)</th>{onEdit && <th />}</tr></thead>
       <tbody>{plans.map((p) => (
         <tr key={p.id}><td><strong>{p.name}</strong> {!p.active && <Badge>hidden</Badge>}{p.description && <small className="block muted">{p.description}</small>}</td>
-          <td>{p.kind}</td>
-          <td className="muted">{p.kind === 'server' ? `${p.cpu} CPU · ${p.memoryMb >= 1024 ? `${p.memoryMb / 1024} GB` : `${p.memoryMb} MB`} RAM · ${p.diskGb} GB disk` : `${p.memoryMb} MB RAM`}</td>
+          <td>{{ server: 'Server', app: 'App (main server)', database: 'Database' }[p.kind] || p.kind}</td>
+          <td className="muted">{p.kind !== 'database' ? `${p.cpu} CPU · ${p.memoryMb >= 1024 ? `${p.memoryMb / 1024} GB` : `${p.memoryMb} MB`} RAM · ${p.diskGb} GB disk` : `${p.memoryMb} MB RAM`}</td>
           <td className="num">{fmtMoney(p.priceDay, cur)}</td><td className="num muted">{fmtMoney(p.priceDay * 30, cur)}</td>
           {onEdit && <td><div className="row-actions"><button type="button" className="btn btn--small" onClick={() => onEdit(p)}>Edit</button>
             <button type="button" className="btn btn--small btn--danger" onClick={() => onDelete(p)}>Delete</button></div></td>}</tr>
@@ -96,12 +96,12 @@ function PlanDialog({ plan, rates, cur, onClose, onDone }) {
     price: plan ? (plan.priceDay / 100).toFixed(2) : '', active: plan ? plan.active : true, description: plan?.description || '', sort: plan?.sort ?? 0, applyToExisting: false,
   }));
   const set = (k) => (e) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
-  const suggested = Math.round((rates.cpuDay || 0) * (f.kind === 'server' ? Number(f.cpu) : 0) + ((rates.ramGbDay || 0) * Number(f.memoryMb)) / 1024
-    + (f.kind === 'server' ? (rates.diskGbDay || 0) * Number(f.diskGb) : 0) + (f.kind === 'database' ? rates.dbDay || 0 : 0));
+  const suggested = Math.round((rates.cpuDay || 0) * (f.kind !== 'database' ? Number(f.cpu) : 0) + ((rates.ramGbDay || 0) * Number(f.memoryMb)) / 1024
+    + (f.kind !== 'database' ? (rates.diskGbDay || 0) * Number(f.diskGb) : 0) + (f.kind === 'database' ? rates.dbDay || 0 : 0));
   async function submit(e) {
     e.preventDefault();
     const body = { kind: f.kind, name: f.name, memoryMb: Number(f.memoryMb), priceDay: toPaisa(f.price), active: f.active, description: f.description, sort: Number(f.sort) || 0,
-      ...(f.kind === 'server' ? { cpu: Number(f.cpu), diskGb: Number(f.diskGb) } : {}), applyToExisting: f.applyToExisting };
+      ...(f.kind !== 'database' ? { cpu: Number(f.cpu), diskGb: Number(f.diskGb) } : {}), applyToExisting: f.applyToExisting };
     const ok = await run(() => api(plan ? `/api/billing/plans/${plan.id}` : '/api/billing/plans', { method: plan ? 'PUT' : 'POST', body }), plan ? 'Plan saved' : 'Plan created');
     if (ok) { onDone(); onClose(); }
   }
@@ -109,11 +109,11 @@ function PlanDialog({ plan, rates, cur, onClose, onDone }) {
     <Dialog open title={plan ? `Edit plan ${plan.name}` : 'New plan'} onClose={onClose} wide>
       <form className="form" onSubmit={submit}>
         <div className="fgrid">
-          <Field label="Kind"><select value={f.kind} disabled={!!plan} onChange={set('kind')}><option value="server">Server (LXD VPS)</option><option value="database">Managed database</option></select></Field>
+          <Field label="Kind"><select value={f.kind} disabled={!!plan} onChange={set('kind')}><option value="server">Server (LXD VPS)</option><option value="app">App on the main server</option><option value="database">Managed database</option></select></Field>
           <Field label="Name"><input required maxLength={40} value={f.name} onChange={set('name')} placeholder="Small" /></Field>
-          {f.kind === 'server' && <Field label="CPU cores"><input type="number" min={1} max={64} required value={f.cpu} onChange={set('cpu')} /></Field>}
+          {f.kind !== 'database' && <Field label="CPU cores"><input type="number" min={1} max={64} required value={f.cpu} onChange={set('cpu')} /></Field>}
           <Field label="Memory (MB)"><input type="number" min={128} step={128} required value={f.memoryMb} onChange={set('memoryMb')} /></Field>
-          {f.kind === 'server' && <Field label="Disk (GB)"><input type="number" min={1} required value={f.diskGb} onChange={set('diskGb')} /></Field>}
+          {f.kind !== 'database' && <Field label="Disk (GB)"><input type="number" min={1} required value={f.diskGb} onChange={set('diskGb')} /></Field>}
           <Field label={`Price per day (${cur})`} hint={suggested ? `From your rates: ${fmtMoney(suggested, cur)}/day` : `${fmtMoney(toPaisa(f.price || 0) * 30, cur)} per 30 days`}>
             <input type="number" min={0} step="0.01" required value={f.price} onChange={set('price')} placeholder="50.00" />
           </Field>

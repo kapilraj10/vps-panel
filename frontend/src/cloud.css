@@ -425,3 +425,4 @@ tr.click { cursor: pointer; }
 .plan-card input { position: absolute; opacity: 0; pointer-events: none; }
 .plan-card__price { font-size: 1.25rem; font-weight: 700; }
 .plan-card__price small { font-size: 0.8rem; font-weight: 450; color: var(--muted); }
+.plan-card.is-off { opacity: 0.5; cursor: not-allowed; }

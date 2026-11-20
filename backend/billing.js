@@ -16,7 +16,7 @@ import { wrap, bad, notFound, conflict, int, str, HttpError } from './http.js';
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,39}$/;
-const KINDS = ['server', 'database'];
+const KINDS = ['server', 'database', 'app'];
 
 export const paymentRequired = (msg) => new HttpError(402, msg);
 
@@ -161,6 +161,7 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
       settle(r, now);
       try {
         if (r.kind === 'server') await stopServer(r.name);
+        else if (r.kind === 'app') await stopServer(r.name.split('/')[0]); // app on the main server: stop its app host
         else await stopDatabase(r.name);
       } catch (err) { failed.push(`${r.name}: ${err.message}`); }
     }
@@ -249,13 +250,14 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
   // Plans
   function parsePlan(b, old = {}) {
     const kind = b.kind ?? old.kind;
-    if (!KINDS.includes(kind)) throw bad('Kind must be server or database');
+    if (!KINDS.includes(kind)) throw bad('Kind must be server, database or app');
+    const sized = kind !== 'database'; // servers and apps have CPU + disk
     const out = {
       kind,
       name: str(b.name ?? old.name, { max: 40, name: 'Name', re: NAME_RE }),
-      cpu: kind === 'server' ? int(b.cpu ?? old.cpu, { min: 1, max: 64, name: 'CPU cores' }) : null,
+      cpu: sized ? int(b.cpu ?? old.cpu, { min: 1, max: 64, name: 'CPU cores' }) : null,
       memory_mb: int(b.memoryMb ?? old.memory_mb, { min: 128, max: 262_144, name: 'Memory (MB)' }),
-      disk_gb: kind === 'server' ? int(b.diskGb ?? old.disk_gb, { min: 1, max: 10_000, name: 'Disk (GB)' }) : null,
+      disk_gb: sized ? int(b.diskGb ?? old.disk_gb, { min: 1, max: 10_000, name: 'Disk (GB)' }) : null,
       price_day: int(b.priceDay ?? old.price_day, { min: 0, max: 1e9, name: 'Price per day (paisa)' }),
       active: (b.active ?? (old.active ?? 1) ? 1 : 0),
       sort: int(b.sort ?? old.sort ?? 0, { min: 0, max: 9999, name: 'Order' }),
@@ -301,7 +303,7 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
     const b = req.body || {};
     const u = users.byId(int(b.userId, { min: 1, max: 1e9, name: 'User' }));
     if (!u || u.role !== 'user') throw bad('Pick a user account (admins are not billed)');
-    if (!KINDS.includes(b.kind)) throw bad('Kind must be server or database');
+    if (!['server', 'database'].includes(b.kind)) throw bad('Kind must be server or database');
     const name = str(b.name, { max: 63, name: 'Name', re: /^[a-zA-Z][a-zA-Z0-9-]{0,62}$/ });
     if (b.kind === 'server' && !u.containers.includes(name)) throw bad(`${name} is not one of ${u.username}'s servers`);
     if (b.kind === 'database' && !db.prepare('SELECT 1 FROM databases WHERE name = ? AND owner_id = ?').get(name, u.id)) throw bad(`${name} is not one of ${u.username}'s databases`);
@@ -346,7 +348,12 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
     return Math.round((r.cpuDay || 0) * cpu + ((r.ramGbDay || 0) * memoryMb) / 1024 + (r.diskGbDay || 0) * diskGb + (database ? r.dbDay || 0 : 0));
   };
 
-  return { router, start, end, rename, settle, tick, startLoop, assertCanAfford, assertCanRun, walletOf, priceFromRates, cfg };
+  // A deleted server takes its main-server apps with it
+  const endPrefix = (kind, prefix, by = null) => {
+    for (const r of db.prepare('SELECT kind, name FROM billed_resources WHERE kind = ? AND ended_at IS NULL').all(kind)) if (r.name.startsWith(prefix)) end(r.kind, r.name, by);
+  };
+
+  return { router, start, end, endPrefix, rename, settle, tick, startLoop, assertCanAfford, assertCanRun, walletOf, priceFromRates, cfg };
 }
 
 export const money = (paisa, cur = 'NPR') => `${cur} ${(paisa / 100).toFixed(2)}`;

@@ -9,6 +9,7 @@ import { seal, open } from './secrets.js';
 import { clientIp, isAdmin, ownsContainer } from './auth.js';
 import { roomFor } from './containers.js';
 import { wrap, bad, forbidden, notFound, conflict, int, str } from './http.js';
+import { plans } from './billing.js';
 
 const APP_NAME_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/;
 const BRANCH_RE = /^[A-Za-z0-9._/-]{1,100}$/;
@@ -139,7 +140,9 @@ const appsDb = {
   deployments: (appId, limit = 30) => db.prepare('SELECT id, kind, by_user, status, commit_sha, started_at, finished_at FROM deployments WHERE app_id = ? ORDER BY id DESC LIMIT ?').all(appId, limit),
 };
 
-export function createApps({ io, containers }) {
+// Targets: 'server' = one of the user's own servers; 'main' = the main server, in the user's panel-managed app host
+// (apphost.js), for users without a VPS. The app is priced by an "app" plan.
+export function createApps({ io, containers, appHost = null, billing = null }) {
   const router = express.Router();
   const busy = new Map(); // appId -> deployment id
   const who = (req) => ({ username: req.session.username, ip: clientIp(req) });
@@ -152,7 +155,8 @@ export function createApps({ io, containers }) {
       owner: a.owner || users.byId(a.user_id)?.username, repoUrl: a.repo_url, branch: a.branch, rootDir: a.root_dir || '',
       outputDir: a.output_dir || '', installCmd: a.install_cmd || '', buildCmd: a.build_cmd || '', startCmd: a.start_cmd || '',
       port: a.port, envKeys, hasGitToken: !!a.git_token_enc, status: a.status, lastDeployAt: a.last_deploy_at,
-      deploying: busy.has(a.id), createdAt: a.created_at,
+      deploying: busy.has(a.id), createdAt: a.created_at, target: a.target || 'server', planId: a.plan_id ?? null,
+      planName: a.plan_id ? plans.get(a.plan_id)?.name || null : null,
       domains: db.prepare("SELECT hostname, status FROM domains WHERE app_id = ? AND status != 'removed'").all(a.id),
     };
   };
@@ -160,7 +164,7 @@ export function createApps({ io, containers }) {
   function mineApp(req) {
     const a = /^\d+$/.test(req.params.id) ? appsDb.get(Number(req.params.id)) : null;
     if (!a) throw notFound('No such application');
-    if (!ownsContainer(req.session, a.container)) throw forbidden('You can only manage your own applications');
+    if (!ownsContainer(req.session, a.container) && a.user_id !== req.session.id) throw forbidden('You can only manage your own applications');
     return a;
   }
   function needRunning(container) {
@@ -207,8 +211,9 @@ export function createApps({ io, containers }) {
   const emitApp = (a) => io.to(['admin', roomFor(a.container)]).emit('app:update', publicApp({ ...appsDb.get(a.id) }));
 
   // Runs a script in the container as a recorded deployment (deploy, runtime install, start/stop/restart)
+  // `req` may also be an actor { username, ip } for background work
   function runRecorded(req, a, kind, script, env, { timeoutMs = 30 * 60_000, onFinish = () => {} } = {}) {
-    const { username, ip } = who(req);
+    const { username, ip } = req.session ? who(req) : req;
     const depId = Number(db.prepare('INSERT INTO deployments (app_id, kind, by_user, status, started_at) VALUES (?, ?, ?, ?, ?)')
       .run(a.id, kind, username, 'running', Date.now()).lastInsertRowid);
     busy.set(a.id, depId);
@@ -237,8 +242,16 @@ export function createApps({ io, containers }) {
   // ---------- routes ----------
   router.get('/apps/types', (_req, res) => res.json({ types: Object.entries(APP_TYPES).map(([id, t]) => ({ id, ...t })) }));
 
+  // App plans for the "Main server" target
+  router.get('/apps/plans', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ plans: plans.list({ kind: 'app', activeOnly: !isAdmin(req.session) }).map((p) => ({
+      id: p.id, name: p.name, cpu: p.cpu, memoryMb: p.memory_mb, diskGb: p.disk_gb, priceDay: p.price_day, description: p.description,
+    })) });
+  });
+
   router.get('/apps', (req, res) => {
-    const list = appsDb.list().filter((a) => ownsContainer(req.session, a.container));
+    const list = appsDb.list().filter((a) => ownsContainer(req.session, a.container) || a.user_id === req.session.id);
     res.set('Cache-Control', 'no-store');
     res.json({ apps: list.map(publicApp) });
   });
@@ -258,8 +271,11 @@ export function createApps({ io, containers }) {
 
   router.post('/apps', wrap(async (req, res) => {
     const b = req.body ?? {};
+    if (b.target === 'main') return createOnMain(req, res);
+    if (b.target && b.target !== 'server') throw bad('Target must be server or main');
     const container = str(b.container, { max: 63, name: 'Server' });
     if (!ownsContainer(req.session, container) || !containers.exists(container)) throw forbidden('Pick one of your servers');
+    if (appHost?.isAppHost(container)) throw bad('That is your managed app host. Pick "Main server" to add apps to it.');
     const name = str(b.name, { max: 32, name: 'App name' }).toLowerCase();
     if (!APP_NAME_RE.test(name)) throw bad('App name: 3-32 lowercase letters, digits or dashes');
     const v = validate(b);
@@ -313,6 +329,10 @@ export function createApps({ io, containers }) {
     const a = mineApp(req);
     needRunning(a.container);
     if (busy.has(a.id)) throw conflict('A deployment for this app is already running');
+    res.status(202).json({ deploymentId: startDeploy(req, a, req.body?.writeDotenv !== false) });
+  }));
+
+  function startDeploy(req, a, writeDotenv = true, after = () => {}) {
     const env = JSON.parse(open(a.env_enc) || '{}');
     const envSh = `${Object.entries({ ...env, PORT: String(a.port) }).map(([k, v]) => `export ${k}=${shQuote(v)}`).join('\n')}\n`;
     const dotenv = `${Object.entries(env).map(([k, v]) => `${k}=${dotenvQuote(v)}`).join('\n')}\n`;
@@ -320,22 +340,96 @@ export function createApps({ io, containers }) {
       APP_NAME: a.name, REPO: a.repo_url, BRANCH: a.branch, ROOT_DIR: a.root_dir || '', PORT: String(a.port),
       INSTALL_CMD: a.install_cmd || '', BUILD_CMD: a.build_cmd || '', GIT_TOKEN: open(a.git_token_enc) || '',
       ENV_SH_B64: b64(envSh), DOTENV_B64: b64(dotenv), ECOSYSTEM_B64: b64(JSON.stringify(ecosystem(a, env), null, 2)),
-      WRITE_DOTENV: req.body?.writeDotenv === false ? '0' : '1',
+      WRITE_DOTENV: writeDotenv ? '1' : '0',
     }, {
       onFinish: (ok) => {
         appsDb.setStatus(a.id, ok ? 'running' : 'failed');
         if (ok) db.prepare('UPDATE apps SET last_deploy_at = ? WHERE id = ?').run(Date.now(), a.id);
+        after(ok);
       },
     });
-    res.status(202).json({ deploymentId: depId });
-  }));
+    return depId;
+  }
+
+  const runtimesFor = (a) => ['node', a.type === 'python' ? 'python' : null, a.type === 'laravel' ? 'php' : null].filter(Boolean).join(',');
+
+  // ---------- main server (managed app host) ----------
+  async function createOnMain(req, res) {
+    const b = req.body ?? {};
+    if (!appHost) throw bad('Deploying on the main server is not available');
+    const user = users.byId(req.session.id);
+    const self = !isAdmin(req.session);
+    const plan = b.planId ? plans.get(int(b.planId, { min: 1, max: 1e9, name: 'Plan' })) : null;
+    if (!plan || plan.kind !== 'app' || (self && !plan.active)) throw bad('Pick an app plan');
+    const name = str(b.name, { max: 32, name: 'App name' }).toLowerCase();
+    if (!APP_NAME_RE.test(name)) throw bad('App name: 3-32 lowercase letters, digits or dashes');
+    const host = appHost.hostNameFor(user.username);
+    if (containers.exists(host) && !appHost.isAppHost(host)) throw conflict(`A server named ${host} already exists that the panel does not manage. Ask the administrator.`);
+    if (db.prepare('SELECT 1 FROM apps WHERE container = ? AND name = ?').get(host, name)) throw conflict(`You already have an app named ${name}`);
+    const t = APP_TYPES[b.type];
+    if (!t) throw bad('Pick an application type');
+    // Port: the type's default, or the next free one in the app host
+    let port = b.port ? int(b.port, { min: 1024, max: 65535, name: 'Port' }) : t.port;
+    const used = new Set(db.prepare('SELECT port FROM apps WHERE container = ?').all(host).map((r) => r.port));
+    if (b.port && used.has(port)) throw conflict(`Port ${port} is already used by another of your apps`);
+    while (used.has(port)) port += 1;
+    const v = validate({ ...b, port });
+    if (self) billing?.assertCanAfford(user.id, plan.price_day);
+    const room = await appHost.checkRoom(user, plan);
+    if (room) return res.status(409).json({ error: `The main server has no room for this plan right now. ${room}` });
+    const env = parseEnv(b.env);
+    const now = Date.now();
+    const id = Number(db.prepare(`INSERT INTO apps (user_id, container, name, type, repo_url, branch, root_dir, output_dir, install_cmd, build_cmd, start_cmd,
+        port, env_enc, git_token_enc, status, created_at, updated_at, target, plan_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisioning', ?, ?, 'main', ?)`)
+      .run(user.id, host, name, v.type, v.repo, v.branch, v.rootDir, v.outputDir, v.installCmd, v.buildCmd, v.startCmd, v.port,
+        seal(JSON.stringify(env)), b.gitToken ? seal(String(b.gitToken).slice(0, 500)) : null, now, now, plan.id).lastInsertRowid);
+    billing?.start({ userId: user.id, kind: 'app', name: `${host}/${name}`, planId: plan.id, priceDay: plan.price_day, by: req.session.username });
+    audit.log({ ...who(req), action: 'app_create', target: `${host}/${name}`, result: 'success', detail: `main server, plan ${plan.name}, ${v.type} ${v.repo}#${v.branch}` });
+    provision(who(req), user, id);
+    return res.status(201).json({ app: publicApp(appsDb.get(id)) });
+  }
+
+  // Background: app host ready -> runtime -> first deploy. Every step is a recorded deployment with its log.
+  function provision(actor, user, appId) {
+    const a = appsDb.get(appId);
+    const depId = Number(db.prepare('INSERT INTO deployments (app_id, kind, by_user, status, started_at) VALUES (?, ?, ?, ?, ?)')
+      .run(a.id, 'provision', actor.username, 'running', Date.now()).lastInsertRowid);
+    busy.set(a.id, depId);
+    let log = '';
+    const say = (m) => { log += `${m}\n`; emitLog(a, depId, `${m}\n`); };
+    emitApp(a);
+    appHost.ensure(user, say)
+      .then((host) => {
+        io.in(`user:${user.id}`).socketsJoin(roomFor(host));
+        say(`App host ${host} is running.`);
+        db.prepare("UPDATE deployments SET status = 'success', log = ?, finished_at = ? WHERE id = ?").run(log, Date.now(), depId);
+        busy.delete(a.id);
+        const fresh = appsDb.get(appId);
+        if (!fresh) return;
+        runRecorded(actor, fresh, 'runtime', RUNTIME_SCRIPT, { RUNTIMES: runtimesFor(fresh) }, {
+          timeoutMs: 20 * 60_000,
+          onFinish: (ok) => {
+            if (!ok) { appsDb.setStatus(appId, 'failed'); return; }
+            const again = appsDb.get(appId);
+            if (again) startDeploy(actor, again);
+          },
+        });
+      })
+      .catch((err) => {
+        say(`[Kapil Cloud] Could not prepare the main server: ${err.message}`);
+        db.prepare("UPDATE deployments SET status = 'failed', log = ?, finished_at = ? WHERE id = ?").run(log, Date.now(), depId);
+        busy.delete(a.id);
+        appsDb.setStatus(appId, 'failed');
+        emitApp(a);
+      });
+  }
+
 
   router.post('/apps/:id/runtime', wrap(async (req, res) => {
     const a = mineApp(req);
     needRunning(a.container);
     if (busy.has(a.id)) throw conflict('Another task for this app is still running');
-    const runtimes = ['node', a.type === 'python' ? 'python' : null, a.type === 'laravel' ? 'php' : null].filter(Boolean).join(',');
-    const depId = runRecorded(req, a, 'runtime', RUNTIME_SCRIPT, { RUNTIMES: runtimes }, { timeoutMs: 20 * 60_000 });
+    const depId = runRecorded(req, a, 'runtime', RUNTIME_SCRIPT, { RUNTIMES: runtimesFor(a) }, { timeoutMs: 20 * 60_000 });
     res.status(202).json({ deploymentId: depId });
   }));
 
@@ -393,6 +487,11 @@ export function createApps({ io, containers }) {
       note = ' The server was stopped, so its PM2 entry and files were left in place.';
     }
     db.prepare('DELETE FROM apps WHERE id = ?').run(a.id);
+    if (a.target === 'main') {
+      billing?.end('app', `${a.container}/${a.name}`, req.session.username);
+      appHost?.release(a.container).catch((err) => console.error(`App host ${a.container}: ${err.message}`));
+      note += ' Billing for it stopped.';
+    }
     audit.log({ ...who(req), action: 'app_delete', target: `${a.container}/${a.name}`, result: 'success', detail: req.body?.removeFiles ? 'files removed' : 'files kept' });
     res.json({ ok: true, note });
   }));

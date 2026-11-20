@@ -4,8 +4,44 @@ import { useLive } from '../live.js';
 import {
   PageHeader, Card, Badge, Empty, SkeletonRows, ErrorNote, Note, Icon, Field, Tabs, href, go, useApi, useAction, useConfirm,
 } from '../ui.jsx';
+import { fmtMoney } from './Billing.jsx';
+import { UserCreateServer } from './Servers.jsx';
 
-const STATUS_TONE = { running: 'good', deploying: 'warn', failed: 'bad', stopped: 'neutral', new: 'neutral' };
+const STATUS_TONE = { running: 'good', deploying: 'warn', provisioning: 'warn', failed: 'bad', stopped: 'neutral', new: 'neutral' };
+const where = (a) => (a.target === 'main' ? 'Main server' : a.container);
+
+// Where to deploy: 1) one of my servers, 2) the main server (no VPS needed, the panel sets it up), 3) a new server
+function TargetPicker({ value, onChange, hasServers, plans, planId, onPlan, onNewServer }) {
+  const opts = [
+    ['server', 'My server', hasServers ? 'Deploy inside one of your VPS servers' : 'You have no server yet', !hasServers],
+    ['main', 'Main server (direct)', 'No VPS needed. The panel runs it for you on the main server.', false],
+    ['new', 'New server', 'Create a VPS from a plan first, then deploy into it', false],
+  ];
+  return (
+    <>
+      <div className="plan-grid">
+        {opts.map(([id, label, sub, disabled]) => (
+          <label key={id} className={`plan-card ${value === id ? 'is-on' : ''} ${disabled ? 'is-off' : ''}`}>
+            <input type="radio" name="target" value={id} disabled={disabled} checked={value === id} onChange={() => onChange(id)} />
+            <strong>{label}</strong><small className="muted">{sub}</small>
+          </label>
+        ))}
+      </div>
+      {value === 'main' && (
+        <Field label="App plan" hint="Charged by the hour from your wallet" wide>
+          <select required value={planId} onChange={(e) => onPlan(e.target.value)}>
+            <option value="">{plans?.length ? 'Pick a plan' : 'No app plans yet: ask the administrator'}</option>
+            {(plans || []).map((p) => <option key={p.id} value={p.id}>{p.name}: {p.cpu} CPU, {p.memoryMb} MB RAM, {p.diskGb} GB · {fmtMoney(p.priceDay)}/day</option>)}
+          </select>
+        </Field>
+      )}
+      {value === 'new' && (
+        <Note>Create the server first; when it is running, come back to New application and pick it under “My server”.
+          <button type="button" className="btn btn--small btn--primary mt8" onClick={onNewServer}>Create a new server</button></Note>
+      )}
+    </>
+  );
+}
 
 function AppForm({ open, onClose, app, onSaved }) {
   const { me, cts } = useLive();
@@ -13,14 +49,17 @@ function AppForm({ open, onClose, app, onSaved }) {
   const types = useApi('/api/apps/types');
   const [f, setF] = useState(null);
   const [envText, setEnvText] = useState('');
-  const servers = Object.values(cts).filter((c) => me.isAdmin || me.containers.includes(c.name)).map((c) => c.name).sort();
+  const servers = Object.values(cts).filter((c) => me.isAdmin || me.containers.includes(c.name)).map((c) => c.name)
+    .filter((n) => !/^apps-/.test(n) || me.isAdmin).sort();
+  const appPlans = useApi(open && !app ? '/api/apps/plans' : null);
+  const [newServer, setNewServer] = useState(false);
   useEffect(() => {
     if (!open) return;
     if (app) {
       setF({ ...app, gitToken: '' });
       api(`/api/apps/${app.id}/env`).then((d) => setEnvText(Object.entries(d.env).map(([k, v]) => `${k}=${v}`).join('\n'))).catch(() => setEnvText(''));
     } else {
-      setF({ container: servers[0] || '', name: '', type: 'node', repoUrl: '', branch: 'main', rootDir: '', outputDir: '', installCmd: '', buildCmd: '', startCmd: '', port: '', gitToken: '' });
+      setF({ target: servers.length ? 'server' : 'main', planId: '', container: servers[0] || '', name: '', type: 'node', repoUrl: '', branch: 'main', rootDir: '', outputDir: '', installCmd: '', buildCmd: '', startCmd: '', port: '', gitToken: '' });
       setEnvText('');
     }
   }, [open, app?.id]);
@@ -35,8 +74,10 @@ function AppForm({ open, onClose, app, onSaved }) {
   const t = types.data?.types.find((x) => x.id === f.type);
   async function submit(e) {
     e.preventDefault();
-    const body = { ...f, port: Number(f.port), env: envText };
+    if (!app && f.target === 'new') return;
+    const body = { ...f, port: Number(f.port), env: envText, planId: f.planId ? Number(f.planId) : undefined };
     if (!f.gitToken) delete body.gitToken;
+    if (!app && f.target === 'main') delete body.container;
     const r = app ? await run(() => api(`/api/apps/${app.id}`, { method: 'PUT', body }), 'Application saved')
       : await run(() => api('/api/apps', { method: 'POST', body }), `Created ${f.name}`);
     if (r) { onSaved(r.app); onClose(); }
@@ -44,8 +85,10 @@ function AppForm({ open, onClose, app, onSaved }) {
   return (
     <Dialog open={open} title={app ? `Edit ${app.name}` : 'New application'} onClose={onClose} wide>
       <form className="form" onSubmit={submit}>
+        {!app && <TargetPicker value={f.target} onChange={(target) => setF({ ...f, target })} hasServers={servers.length > 0}
+          plans={appPlans.data?.plans} planId={f.planId} onPlan={(planId) => setF({ ...f, planId })} onNewServer={() => setNewServer(true)} />}
         <div className="fgrid">
-          {!app && <Field label="Server"><select required value={f.container} onChange={set('container')}>{servers.map((s) => <option key={s}>{s}</option>)}</select></Field>}
+          {!app && f.target === 'server' && <Field label="Server"><select required value={f.container} onChange={set('container')}>{servers.map((s) => <option key={s}>{s}</option>)}</select></Field>}
           {!app && <Field label="App name" hint="Also the PM2 process name"><input required value={f.name} onChange={(e) => setF({ ...f, name: e.target.value.toLowerCase() })} pattern="[a-z][a-z0-9\-]{1,30}[a-z0-9]" /></Field>}
           {!app && <Field label="Type"><select value={f.type} onChange={set('type')}>{(types.data?.types || []).map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}</select></Field>}
           <Field label="Git repository (https)" wide><input required type="url" value={f.repoUrl} onChange={set('repoUrl')} placeholder="https://github.com/you/app.git" /></Field>
@@ -65,9 +108,11 @@ function AppForm({ open, onClose, app, onSaved }) {
         </Field>
         <div className="dialog__buttons">
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn btn--primary">{app ? 'Save' : 'Create application'}</button>
+          <button type="submit" className="btn btn--primary" disabled={!app && f.target === 'new'}>{app ? 'Save' : f.target === 'main' ? 'Create and deploy' : 'Create application'}</button>
         </div>
+        {!app && f.target === 'main' && <p className="muted small">The first app on the main server takes a few minutes: the panel prepares a private, isolated space for your apps, installs the runtime and deploys. Follow it on the app page.</p>}
       </form>
+      {newServer && <UserCreateServer open onClose={() => setNewServer(false)} />}
     </Dialog>
   );
 }
@@ -107,7 +152,7 @@ function AppDetail({ id }) {
   return (
     <>
       <PageHeader back={href('apps')} title={<span className="title-with-badge">{a.name} <Badge tone={STATUS_TONE[a.status]} dot>{a.deploying ? 'deploying' : a.status}</Badge></span>}
-        sub={`${a.typeLabel} on ${a.container} · port ${a.port}${a.lastDeployAt ? ` · deployed ${ago(a.lastDeployAt)}` : ''}`}
+        sub={`${a.typeLabel} on ${where(a)}${a.planName ? ` (${a.planName})` : ''} · port ${a.port}${a.lastDeployAt ? ` · deployed ${ago(a.lastDeployAt)}` : ''}`}
         actions={(
           <div className="btn-row">
             <button type="button" className="btn btn--primary" disabled={a.deploying || !serverUp} onClick={() => op('deploy')}><Icon name="git" size={14} /> Deploy</button>
@@ -118,7 +163,8 @@ function AppDetail({ id }) {
             <button type="button" className="btn btn--danger" onClick={del} aria-label="Delete app"><Icon name="trash" size={14} /></button>
           </div>
         )} />
-      {!serverUp && <Note tone="warn">{a.container} is not running. Start the server to deploy or control this app.</Note>}
+      {!serverUp && a.status === 'provisioning' && <Note>Preparing the main server for this app. The first deploy starts by itself; watch the Deploy log.</Note>}
+      {!serverUp && a.status !== 'provisioning' && <Note tone="warn">{where(a)} is not running. Start the server to deploy or control this app.</Note>}
       <div className="grid2">
         <Card title="Source">
           <dl className="facts">
@@ -182,7 +228,7 @@ export default function Apps({ selected }) {
             <tbody>{apps.map((a) => (
               <tr key={a.id} className="click" onClick={() => go(`apps/${a.id}`)}>
                 <td><a href={href(`apps/${a.id}`)}><strong>{a.name}</strong></a><small className="block muted">{a.typeLabel} · port {a.port}</small></td>
-                <td>{a.container}</td>
+                <td>{where(a)}</td>
                 <td><Badge tone={STATUS_TONE[a.status]} dot>{a.deploying ? 'deploying' : a.status}</Badge></td>
                 <td className="muted ellipsis">{a.repoUrl.replace(/^https:\/\//, '')}#{a.branch}</td>
                 <td>{a.domains.map((d) => <span key={d.hostname} className="chip">{d.hostname}</span>)}</td>

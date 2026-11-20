@@ -120,3 +120,4 @@ apps, warm standby with automatic failover.
 | Billing UI: admin Billing & plans; user Wallet, New server, Managed databases | ✅ builds; not click-tested on the server |
 | New PC joins as a server (LXD on the node, deploy targets) | ⬜ next phase |
 | Warm standby + automatic failover to the next server | ⬜ phase after that |
+| New application: 3 targets — My server / **Main server (direct, no VPS needed)** / New server | ✅ tested: main server = one panel-managed unprivileged LXD app host per user (`apps-<user>`, `backend/apphost.js`), sized by "app" plans, billed per app, deleted with the last app (migration 8) |

@@ -375,6 +375,7 @@ export function createServers({ io, containers, allocator, stacks = null, billin
         containerMeta.remove(name);
       })();
       billing?.end('server', name, req.session.username);
+      billing?.endPrefix('app', `${name}/`, req.session.username); // apps on a deleted app host
       return `Deleted ${name}`;
     }));
   }));
