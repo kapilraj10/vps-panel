@@ -2,9 +2,9 @@
 
 | Workflow | When | What |
 |---|---|---|
-| `CI` (`.github/workflows/ci.yml`) | every push (other branches) and pull request | backend e2e tests, helper tests, frontend build |
-| `Deploy` (`.github/workflows/deploy.yml`) | push to `kapil-cloud` | CI, then deploy to **staging** (cloude.sampannatech.online) |
-| `Deploy` → Run workflow → `production` | by hand only | CI, then deploy to **production** (panel.kapilrajkc.com.np) |
+| `CI` (`.github/workflows/ci.yml`) | every push to other branches (e.g. `kapil-cloud`) and every pull request | backend e2e tests, helper tests, frontend build |
+| `Deploy` (`.github/workflows/deploy.yml`) | push to `main` (merged pull request) | CI, then deploy to the panel in the variable `DEPLOY_TARGET` (`staging` = cloude.sampannatech.online, the default; `production` = panel.kapilrajkc.com.np) |
+| `Deploy` → Run workflow | by hand | CI, then deploy to the panel you pick |
 
 Deploys run `system/deploy.sh`, which builds a release, sends it over the Cloudflare SSH tunnel and runs
 `system/upgrade-panel.sh` on the server (the old version is kept; if the new one does not come up it rolls back by itself).

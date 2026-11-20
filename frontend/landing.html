@@ -3,14 +3,34 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Sampanna Cloud · Deploy apps in Nepal</title>
-    <meta name="description" content="Sampanna Cloud: deploy apps, servers and databases from Git with a free HTTPS subdomain. Prepaid, pay per day, hosted in Nepal." />
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232a78d6'/><text x='16' y='22' font-family='Arial' font-weight='700' font-size='18' fill='white' text-anchor='middle'>S</text></svg>" />
+    <!-- %SEO_*% / %SITE_URL% are filled at build time from src/landing.config.js (vite.config.js) -->
+    <title>%SEO_TITLE%</title>
+    <meta name="description" content="%SEO_DESCRIPTION%" />
+    <meta name="keywords" content="%SEO_KEYWORDS%" />
+    <link rel="canonical" href="%SITE_URL%/" />
+    <meta name="theme-color" content="#2a78d6" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Sampanna Cloud" />
+    <meta property="og:locale" content="en_NP" />
+    <meta property="og:url" content="%SITE_URL%/" />
+    <meta property="og:title" content="%SEO_TITLE%" />
+    <meta property="og:description" content="%SEO_DESCRIPTION%" />
+    <meta property="og:image" content="%SITE_URL%%SEO_OG_IMAGE%" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Sampanna Cloud: deploy your app in Nepal, pay in rupees" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="%SEO_TITLE%" />
+    <meta name="twitter:description" content="%SEO_DESCRIPTION%" />
+    <meta name="twitter:image" content="%SITE_URL%%SEO_OG_IMAGE%" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M9.6 22.5h12.6a4.6 4.6 0 0 0 .7-9.15 6.6 6.6 0 0 0-12.55 1.5A3.9 3.9 0 0 0 9.6 22.5z' fill='%23fff'/%3E%3Cpath d='M16 20.2v-6.1M13.3 16.6 16 13.9l2.7 2.7' stroke='%231f5fb4' stroke-width='1.9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet" />
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Sampanna Cloud","url":"%SITE_URL%/","areaServed":"NP","address":{"@type":"PostalAddress","addressLocality":"Kathmandu","addressCountry":"NP"}}</script>
   </head>
   <body>
+    <noscript>Sampanna Cloud: cloud hosting in Nepal. Deploy apps from Git, VPS and managed databases on servers in Kathmandu; pay in rupees with eSewa, Khalti or bank. Please enable JavaScript to see prices and sign up.</noscript>
     <div id="root"></div>
     <script type="module" src="/src/landing.jsx"></script>
   </body>

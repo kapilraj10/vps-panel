@@ -1,6 +1,7 @@
 // Sampanna Cloud shell: session, live socket, sidebar navigation (admin vs user), command palette, routing.
 import { useEffect, useMemo, useState, lazy, Suspense } from 'react';
 import { LiveCtx } from './live.js';
+import { LogoMark } from './brand.jsx';
 import { io } from 'socket.io-client';
 import { api, setCsrf, MAX_POINTS, getThemePref, setThemePref } from './lib.jsx';
 import { Providers, Icon, CommandPalette, useRoute, go, href, useToast, SkeletonRows } from './ui.jsx';
@@ -219,7 +220,7 @@ function Shell() {
   }
 
   if (!me || !socket) {
-    return <div className="boot"><div className="boot__logo">S</div><SkeletonRows rows={3} /></div>;
+    return <div className="boot"><LogoMark size={48} /><SkeletonRows rows={3} /></div>;
   }
 
   const first = ALIASES[route[0]] || route[0] || 'overview';
@@ -270,7 +271,7 @@ function Shell() {
       <div className={`shell ${navOpen ? 'shell--nav' : ''}`}>
         <aside className="side" aria-label="Main navigation">
           <a className="brand" href={href('overview')}>
-            <span className="brand__mark">S</span>
+            <LogoMark size={34} />
             <span className="brand__text">Sampanna Cloud<small>{me.isAdmin ? 'Admin console' : 'Cloud dashboard'}</small></span>
           </a>
           <nav>
