@@ -48,8 +48,8 @@ export const LINKS = {
 // TODO(Kapil): real contact details
 export const CONTACT = {
   email: 'support@sampanna.app',
-  phone: '+977 98XXXXXXXX',
-  whatsapp: 'https://wa.me/97798XXXXXXXX',
+  phone: '+977 9704167805',
+  whatsapp: 'https://wa.me/9779704167805',
   address: 'Kathmandu, Nepal',
 };
 
