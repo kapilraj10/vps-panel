@@ -57,7 +57,7 @@ working code; each phase extends it and keeps the e2e tests green.
 | 1 Inspect + plan | ✅ this document |
 | 2 Schema + authorization | ✅ migration 9 (packages: plans.max_apps/max_databases, users.hosting_plan_id; customer_servers; databases.target/server_id + Redis; invoices), idempotent settlement (test/billing-unit.test.js) |
 | 3 Admin + customer panels | |
-| 4 Main server deployment engine | |
+| 4 Main server deployment engine | ✅ hosting packages (one per user, max apps, upgrade resizes the host, ends with the last app), customer commands run as user `app` (not root) in the app host, `git ls-remote` check before saving, live per-app CPU/RAM. Docker runtime: phase 5 (needs nesting decision) |
 | 5 Customer VPS engine | |
 | 6 Managed databases | |
 | 7 Billing + monitoring | |

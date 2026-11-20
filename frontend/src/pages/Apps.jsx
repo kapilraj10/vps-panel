@@ -2,17 +2,20 @@ import { useEffect, useRef, useState } from 'react';
 import { api, ago, dateTime, Dialog } from '../lib.jsx';
 import { useLive } from '../live.js';
 import {
-  PageHeader, Card, Badge, Empty, SkeletonRows, ErrorNote, Note, Icon, Field, Tabs, href, go, useApi, useAction, useConfirm,
+  PageHeader, Card, Badge, Empty, SkeletonRows, ErrorNote, Note, Icon, Field, Tabs, Stat, href, go, useApi, useAction, useConfirm,
 } from '../ui.jsx';
 import { fmtMoney } from './Billing.jsx';
 import { UserCreateServer } from './Servers.jsx';
 
 const STATUS_TONE = { running: 'good', deploying: 'warn', provisioning: 'warn', failed: 'bad', stopped: 'neutral', new: 'neutral' };
 const where = (a) => (a.target === 'main' ? 'Main server' : a.container);
-const priceText = (a) => (a.target === 'main' ? (a.priceDay != null ? `${fmtMoney(a.priceDay)}/day${a.planName ? ` · ${a.planName}` : ''}` : 'plan removed') : 'included in the server');
+const priceText = (a) => (a.target === 'main' ? (a.planName ? `in your ${a.planName} package` : 'hosting package') : 'included in the server');
+const memText = (b) => (b >= 1073741824 ? `${(b / 1073741824).toFixed(2)} GB` : `${Math.round(b / 1048576)} MB`);
 
 // Where to deploy: 1) one of my servers, 2) the main server (no VPS needed, the panel sets it up), 3) a new server
-function TargetPicker({ value, onChange, hasServers, plans, planId, onPlan, onNewServer }) {
+function TargetPicker({ value, onChange, hasServers, hosting, planId, onPlan, onNewServer }) {
+  const pkg = hosting?.package;
+  const plans = hosting?.packages;
   const opts = [
     ['server', 'My server', hasServers ? 'Deploy inside one of your VPS servers' : 'You have no server yet', !hasServers],
     ['main', 'Main server (direct)', 'No VPS needed. The panel runs it for you on the main server.', false],
@@ -28,19 +31,49 @@ function TargetPicker({ value, onChange, hasServers, plans, planId, onPlan, onNe
           </label>
         ))}
       </div>
-      {value === 'main' && (
-        <Field label="App plan" hint="Charged by the hour from your wallet" wide>
-          <select required value={planId} onChange={(e) => onPlan(e.target.value)}>
-            <option value="">{plans?.length ? 'Pick a plan' : 'No app plans yet: ask the administrator'}</option>
-            {(plans || []).map((p) => <option key={p.id} value={p.id}>{p.name}: {p.cpu} CPU, {p.memoryMb} MB RAM, {p.diskGb} GB · {fmtMoney(p.priceDay)}/day</option>)}
-          </select>
-        </Field>
+      {value === 'main' && pkg && (
+        <Note tone={pkg.maxApps != null && hosting.appsUsed >= pkg.maxApps ? 'warn' : 'info'}>
+          Your hosting package: <strong>{pkg.name}</strong> ({pkg.cpu} CPU, {pkg.memoryMb >= 1024 ? `${pkg.memoryMb / 1024} GB` : `${pkg.memoryMb} MB`} RAM, {pkg.diskGb} GB),
+          {' '}{hosting.appsUsed} of {pkg.maxApps ?? '∞'} apps used, {fmtMoney(pkg.priceDay)}/day.
+          {pkg.maxApps != null && hosting.appsUsed >= pkg.maxApps && <> Upgrade it in <a href={href('wallet')}>Wallet &amp; billing</a> to add more apps.</>}
+        </Note>
+      )}
+      {value === 'main' && !pkg && (
+        <>
+          <p className="muted small">Pick a hosting package. It covers all your apps on the main server; you pay it per day while you have at least one app there.</p>
+          <div className="plan-grid">
+            {(plans || []).map((p) => (
+              <label key={p.id} className={`plan-card ${String(planId) === String(p.id) ? 'is-on' : ''}`}>
+                <input type="radio" name="pkg" value={p.id} checked={String(planId) === String(p.id)} onChange={() => onPlan(String(p.id))} />
+                <strong>{p.name}</strong>
+                <span>{p.cpu} CPU · {p.memoryMb >= 1024 ? `${p.memoryMb / 1024} GB` : `${p.memoryMb} MB`} RAM · {p.diskGb} GB</span>
+                <span>{p.maxApps == null ? 'Unlimited apps' : `${p.maxApps} app${p.maxApps === 1 ? '' : 's'}`}</span>
+                <span className="plan-card__price">{fmtMoney(p.priceDay)}<small>/day</small></span>
+              </label>
+            ))}
+            {plans && !plans.length && <Note tone="warn">No hosting packages yet. Ask the administrator.</Note>}
+          </div>
+        </>
       )}
       {value === 'new' && (
         <Note>Create the server first; when it is running, come back to New application and pick it under “My server”.
           <button type="button" className="btn btn--small btn--primary mt8" onClick={onNewServer}>Create a new server</button></Note>
       )}
     </>
+  );
+}
+
+// Live CPU / RAM of the app's process (refreshes every 10 s)
+function AppStats({ id }) {
+  const { data } = useApi(`/api/apps/${id}/stats`, { interval: 10_000 });
+  if (!data?.running) return null;
+  return (
+    <div className="kpis">
+      <Stat label="Process" icon="activity" value={data.status || '–'} sub={data.uptime ? `up ${ago(data.uptime).replace(' ago', '')}` : ''} />
+      <Stat label="CPU" icon="cpu" value={data.cpu != null ? `${data.cpu}%` : '–'} />
+      <Stat label="Memory" icon="memory" value={data.memory != null ? memText(data.memory) : '–'} />
+      <Stat label="Restarts" icon="refresh" value={data.restarts ?? '–'} />
+    </div>
   );
 }
 
@@ -52,7 +85,7 @@ function AppForm({ open, onClose, app, onSaved }) {
   const [envText, setEnvText] = useState('');
   const servers = Object.values(cts).filter((c) => me.isAdmin || me.containers.includes(c.name)).map((c) => c.name)
     .filter((n) => !/^apps-/.test(n) || me.isAdmin).sort();
-  const appPlans = useApi(open && !app ? '/api/apps/plans' : null);
+  const hosting = useApi(open && !app ? '/api/hosting' : null);
   const [newServer, setNewServer] = useState(false);
   useEffect(() => {
     if (!open) return;
@@ -87,7 +120,7 @@ function AppForm({ open, onClose, app, onSaved }) {
     <Dialog open={open} title={app ? `Edit ${app.name}` : 'New application'} onClose={onClose} wide>
       <form className="form" onSubmit={submit}>
         {!app && <TargetPicker value={f.target} onChange={(target) => setF({ ...f, target })} hasServers={servers.length > 0}
-          plans={appPlans.data?.plans} planId={f.planId} onPlan={(planId) => setF({ ...f, planId })} onNewServer={() => setNewServer(true)} />}
+          hosting={hosting.data} planId={f.planId} onPlan={(planId) => setF({ ...f, planId })} onNewServer={() => setNewServer(true)} />}
         <div className="fgrid">
           {!app && f.target === 'server' && <Field label="Server"><select required value={f.container} onChange={set('container')}>{servers.map((s) => <option key={s}>{s}</option>)}</select></Field>}
           {!app && <Field label="App name" hint="Also the PM2 process name"><input required value={f.name} onChange={(e) => setF({ ...f, name: e.target.value.toLowerCase() })} pattern="[a-z][a-z0-9\-]{1,30}[a-z0-9]" /></Field>}
@@ -164,6 +197,7 @@ function AppDetail({ id }) {
             <button type="button" className="btn btn--danger" onClick={del} aria-label="Delete app"><Icon name="trash" size={14} /></button>
           </div>
         )} />
+      {serverUp && <AppStats id={a.id} />}
       {!serverUp && a.status === 'provisioning' && <Note>Preparing the main server for this app. The first deploy starts by itself; watch the Deploy log.</Note>}
       {!serverUp && a.status !== 'provisioning' && <Note tone="warn">{where(a)} is not running. Start the server to deploy or control this app.</Note>}
       <div className="grid2">

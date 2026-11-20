@@ -3,6 +3,7 @@
 // User build/start commands run as root inside the user's own container, which they already control fully
 // through the terminal, so nothing here gives them more than they have. Nothing ever runs on the host.
 import express from 'express';
+import { execFile } from 'node:child_process';
 import { db, audit, users } from './db.js';
 import { execStream } from './lxd.js';
 import { seal, open } from './secrets.js';
@@ -30,6 +31,19 @@ export const APP_TYPES = {
 };
 
 // ---------- scripts that run inside the container ----------
+// On the main server (app host) customer commands never run as root: with RUN_AS set, a script re-runs itself as that
+// user after root has fixed the ownership of the app folders. On a customer's own server it runs as root, which they
+// already have through the terminal anyway.
+const AS_USER = `if [ -n "\${RUN_AS:-}" ] && [ "$(id -u)" = 0 ]; then
+  id "$RUN_AS" >/dev/null 2>&1 || { echo "User $RUN_AS is missing. Run 'Install runtime' first."; exit 24; }
+  mkdir -p /srv/apps/.kapilcloud
+  chown "$RUN_AS:$RUN_AS" /srv/apps /srv/apps/.kapilcloud && chmod 700 /srv/apps/.kapilcloud
+  if [ -n "\${APP_NAME:-}" ]; then for d in "/srv/apps/$APP_NAME" "/srv/apps/.kapilcloud/$APP_NAME"; do [ ! -e "$d" ] || chown -R "$RUN_AS:$RUN_AS" "$d"; done; fi
+  export HOME="/home/$RUN_AS" PM2_HOME="/home/$RUN_AS/.pm2" USER="$RUN_AS" LOGNAME="$RUN_AS"
+  exec runuser -m -u "$RUN_AS" -- bash -c "$BASH_EXECUTION_STRING"
+fi
+`;
+
 export const RUNTIME_SCRIPT = `set -eu
 export DEBIAN_FRONTEND=noninteractive
 echo "==> Updating package lists"
@@ -44,11 +58,18 @@ echo "==> Making PM2 start on boot"
 pm2 startup systemd -u root --hp /root >/dev/null 2>&1 || true
 systemctl enable pm2-root >/dev/null 2>&1 || true
 mkdir -p /srv/apps/.kapilcloud && chmod 700 /srv/apps/.kapilcloud
+if [ -n "\${RUN_AS:-}" ]; then
+  id "$RUN_AS" >/dev/null 2>&1 || useradd -m -s /bin/bash "$RUN_AS"
+  chown "$RUN_AS:$RUN_AS" /srv/apps /srv/apps/.kapilcloud
+  pm2 startup systemd -u "$RUN_AS" --hp "/home/$RUN_AS" >/dev/null 2>&1 || true
+  systemctl enable "pm2-$RUN_AS" >/dev/null 2>&1 || true
+  echo "==> Apps run as the unprivileged user $RUN_AS, not root"
+fi
 echo "==> Node $(node -v 2>/dev/null || echo missing), PM2 $(pm2 -v 2>/dev/null || echo missing)"
 `;
 
 const DEPLOY_SCRIPT = `set -eu
-export DEBIAN_FRONTEND=noninteractive
+${AS_USER}export DEBIAN_FRONTEND=noninteractive
 command -v git >/dev/null || { echo "git is not installed in this server. Run 'Install runtime' first."; exit 20; }
 command -v pm2 >/dev/null || { echo "PM2 is not installed in this server. Run 'Install runtime' first."; exit 21; }
 APP_DIR="/srv/apps/$APP_NAME"
@@ -90,7 +111,7 @@ echo "==> Deployed. Listening on port $PORT inside the server."
 `;
 
 const PM2_SCRIPT = `set -eu
-command -v pm2 >/dev/null || { echo "PM2 is not installed in this server."; exit 21; }
+${AS_USER}command -v pm2 >/dev/null || { echo "PM2 is not installed in this server."; exit 21; }
 case "$OP" in
   start) if pm2 describe "$APP_NAME" >/dev/null 2>&1; then pm2 start "$APP_NAME"; else pm2 start "/srv/apps/.kapilcloud/$APP_NAME/ecosystem.json"; fi ;;
   stop) pm2 stop "$APP_NAME" ;;
@@ -105,6 +126,30 @@ pm2 save >/dev/null 2>&1 || true
 `;
 
 const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
+
+// Can the panel see this repository and branch (with the token, if any)? Runs `git ls-remote` from the panel host
+// before anything is saved, so a typo or a missing token fails at once instead of in the middle of a deploy.
+// GIT_CHECK=off skips it (tests, offline installs). A network failure does not block: the deploy log will show it.
+export function checkRepo(repo, branch, token = '') {
+  if (process.env.GIT_CHECK === 'off') return Promise.resolve({ checked: false });
+  const args = [];
+  if (token) args.push('-c', `http.extraHeader=Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`);
+  args.push('ls-remote', '--heads', '--', repo, branch);
+  return new Promise((resolve, reject) => {
+    execFile('git', args, { timeout: 20_000, env: { PATH: process.env.PATH, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'true', HOME: '/nonexistent' } }, (err, stdout, stderr) => {
+      const msg = String(stderr || err?.message || '');
+      if (!err) {
+        if (!stdout.trim()) return reject(bad(`Branch "${branch}" was not found in ${repo}`));
+        return resolve({ checked: true });
+      }
+      if (err.code === 'ENOENT' || err.killed || /Could not resolve host|timed out|Connection refused|Network is unreachable/i.test(msg)) return resolve({ checked: false, warning: msg.slice(0, 200) });
+      if (/not found|Authentication failed|could not read Username|403|401/i.test(msg)) {
+        return reject(bad(token ? 'The repository was not found, or the access token cannot read it.' : 'The repository was not found or is private. For a private repository add an access token.'));
+      }
+      return reject(bad(`Git could not read the repository: ${msg.split('\n').filter(Boolean).pop()?.slice(0, 200) || 'unknown error'}`));
+    });
+  });
+}
 const shQuote = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
 const dotenvQuote = (v) => `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
 
@@ -158,9 +203,9 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
       outputDir: a.output_dir || '', installCmd: a.install_cmd || '', buildCmd: a.build_cmd || '', startCmd: a.start_cmd || '',
       port: a.port, envKeys, hasGitToken: !!a.git_token_enc, status: a.status, lastDeployAt: a.last_deploy_at,
       deploying: busy.has(a.id), createdAt: a.created_at, target: a.target || 'server', planId: a.plan_id ?? null,
-      planName: a.plan_id ? plans.get(a.plan_id)?.name || null : null,
-      // What the owner actually pays per day for it (apps on their own server are included in the server's price)
-      priceDay: a.target === 'main' ? db.prepare("SELECT price_day FROM billed_resources WHERE kind = 'app' AND name = ? AND ended_at IS NULL").get(`${a.container}/${a.name}`)?.price_day ?? plans.get(a.plan_id)?.price_day ?? null : null,
+      // Main server: the owner's hosting package covers all their apps there; on their own server it is in the server's price
+      planName: a.target === 'main' ? appHost?.packageOf(a.user_id)?.name || null : null,
+      priceDay: null,
       domains: db.prepare("SELECT hostname, status FROM domains WHERE app_id = ? AND status != 'removed'").all(a.id),
     };
   };
@@ -226,7 +271,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     audit.log({ username, ip, action: `app_${kind}`, target: `${a.container}/${a.name}`, result: 'requested' });
     let log = '';
     execStream(a.container, ['bash', '-c', script], {
-      env, timeoutMs,
+      env: { ...runAs(a.container), ...env }, timeoutMs,
       onOutput: (text) => { log = (log + text).slice(-LOG_KEEP); emitLog(a, depId, text); },
     })
       .then(({ code }) => ({ ok: code === 0, code }))
@@ -284,6 +329,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     if (!APP_NAME_RE.test(name)) throw bad('App name: 3-32 lowercase letters, digits or dashes');
     const v = validate(b);
     if (db.prepare('SELECT 1 FROM apps WHERE container = ? AND name = ?').get(container, name)) throw conflict(`${name} already exists on ${container}`);
+    await checkRepo(v.repo, v.branch, b.gitToken);
     if (db.prepare('SELECT 1 FROM apps WHERE container = ? AND port = ?').get(container, v.port)) throw conflict(`Port ${v.port} is already used by another app on ${container}`);
     const env = parseEnv(b.env);
     const ownerId = isAdmin(req.session) ? (users.ownersOf(container)[0]?.id || req.session.id) : req.session.id;
@@ -312,6 +358,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
       envEnc = seal(JSON.stringify(next));
     }
     const tokenEnc = b.gitToken === '' ? null : b.gitToken ? seal(String(b.gitToken).slice(0, 500)) : a.git_token_enc;
+    if (v.repo !== a.repo_url || v.branch !== a.branch || b.gitToken) await checkRepo(v.repo, v.branch, open(tokenEnc) || '');
     db.prepare(`UPDATE apps SET repo_url = ?, branch = ?, root_dir = ?, output_dir = ?, install_cmd = ?, build_cmd = ?, start_cmd = ?, port = ?,
         env_enc = ?, git_token_enc = ?, updated_at = ? WHERE id = ?`)
       .run(v.repo, v.branch, v.rootDir, v.outputDir, v.installCmd, v.buildCmd, v.startCmd, v.port, envEnc, tokenEnc, Date.now(), a.id);
@@ -356,7 +403,58 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     return depId;
   }
 
+  const runAs = (container) => (appHost?.isAppHost(container) ? { RUN_AS: 'app' } : {});
   const runtimesFor = (a) => ['node', a.type === 'python' ? 'python' : null, a.type === 'laravel' ? 'php' : null].filter(Boolean).join(',');
+
+  // ---------- hosting package (main server) ----------
+  router.get('/hosting', (req, res) => {
+    const pkg = appHost?.packageOf(req.session.id);
+    const host = appHost?.hostNameFor(req.session.username);
+    const used = host ? db.prepare("SELECT COUNT(*) AS n FROM apps WHERE container = ? AND target = 'main'").get(host).n : 0;
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      package: pkg && { id: pkg.id, name: pkg.name, cpu: pkg.cpu, memoryMb: pkg.memory_mb, diskGb: pkg.disk_gb, maxApps: pkg.max_apps, priceDay: pkg.price_day },
+      appsUsed: used, host: host && containers.exists(host) ? { name: host, status: containers.snapshot(host)?.status || null } : null,
+      packages: plans.list({ kind: 'app', activeOnly: !isAdmin(req.session) }).map((p) => ({ id: p.id, name: p.name, cpu: p.cpu, memoryMb: p.memory_mb, diskGb: p.disk_gb, maxApps: p.max_apps, priceDay: p.price_day, description: p.description })),
+    });
+  });
+
+  // Change package (up or down). Starts with the first app; ends with the last one.
+  router.put('/hosting', wrap(async (req, res) => {
+    const user = users.byId(req.session.id);
+    const cur = appHost.packageOf(user.id);
+    if (!cur) throw bad('You have no hosting package yet. It starts with your first app on the main server.');
+    const plan = plans.get(int(req.body?.planId, { min: 1, max: 1e9, name: 'Package' }));
+    if (!plan || plan.kind !== 'app' || (!plan.active && !isAdmin(req.session))) throw bad('Pick an available package');
+    if (plan.id === cur.id) return res.json({ ok: true });
+    const host = appHost.hostNameFor(user.username);
+    const used = db.prepare("SELECT COUNT(*) AS n FROM apps WHERE container = ? AND target = 'main'").get(host).n;
+    if (plan.max_apps != null && used > plan.max_apps) throw conflict(`${plan.name} allows ${plan.max_apps} apps and you have ${used}. Delete some first.`);
+    const curDisk = cur.disk_gb || 0;
+    if ((plan.disk_gb || 0) < curDisk) throw bad('A smaller disk is not possible (it could destroy data). Pick a package with at least the same disk.');
+    if (!isAdmin(req.session) && plan.price_day > cur.price_day) billing?.assertCanAfford(user.id, plan.price_day - cur.price_day);
+    const room = await appHost.checkRoom(user, plan);
+    if (room) return res.status(409).json({ error: `The main server has no room for ${plan.name} right now. ${room}` });
+    db.prepare('UPDATE users SET hosting_plan_id = ? WHERE id = ?').run(plan.id, user.id);
+    const r = db.prepare("SELECT * FROM billed_resources WHERE kind = 'app' AND name = ? AND ended_at IS NULL").get(host);
+    if (r) { billing.settle(r); db.prepare('UPDATE billed_resources SET price_day = ?, plan_id = ? WHERE id = ?').run(plan.price_day, plan.id, r.id); }
+    await appHost.applyPackage(user);
+    audit.log({ ...who(req), action: 'hosting_change', target: user.username, result: 'success', detail: `${cur.name} -> ${plan.name}` });
+    return res.json({ ok: true });
+  }));
+
+  // Live CPU / RAM / restarts of one app (from PM2 in its server)
+  router.get('/apps/:id/stats', wrap(async (req, res) => {
+    const a = mineApp(req);
+    res.set('Cache-Control', 'no-store');
+    if (containers.snapshot(a.container)?.status !== 'Running') return res.json({ running: false });
+    const r = await execStream(a.container, ['bash', '-c', PM2_SCRIPT], { env: { ...runAs(a.container), OP: 'status', APP_NAME: a.name, REMOVE_FILES: '0' }, timeoutMs: 30_000 });
+    let list = [];
+    try { list = JSON.parse(r.output.slice(r.output.indexOf('['))); } catch { list = []; }
+    const p = list.find((x) => x.name === a.name);
+    return res.json(p ? { running: true, status: p.pm2_env?.status, cpu: p.monit?.cpu ?? 0, memory: p.monit?.memory ?? 0, restarts: p.pm2_env?.restart_time ?? 0, uptime: p.pm2_env?.pm_uptime ?? null }
+      : { running: true, status: 'not started' });
+  }));
 
   // ---------- main server (managed app host) ----------
   async function createOnMain(req, res) {
@@ -364,13 +462,19 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     if (!appHost) throw bad('Deploying on the main server is not available');
     const user = users.byId(req.session.id);
     const self = !isAdmin(req.session);
-    const plan = b.planId ? plans.get(int(b.planId, { min: 1, max: 1e9, name: 'Plan' })) : null;
-    if (!plan || plan.kind !== 'app' || (self && !plan.active)) throw bad('Pick an app plan');
+    // Hosting package: the user's current one, or the one picked now (first app on the main server)
+    const current = appHost.packageOf(user.id);
+    const plan = current || (b.planId ? plans.get(int(b.planId, { min: 1, max: 1e9, name: 'Plan' })) : null);
+    if (!plan || plan.kind !== 'app' || (self && !current && !plan.active)) throw bad('Pick a hosting package');
     const name = str(b.name, { max: 32, name: 'App name' }).toLowerCase();
     if (!APP_NAME_RE.test(name)) throw bad('App name: 3-32 lowercase letters, digits or dashes');
     const host = appHost.hostNameFor(user.username);
     if (containers.exists(host) && !appHost.isAppHost(host)) throw conflict(`A server named ${host} already exists that the panel does not manage. Ask the administrator.`);
     if (db.prepare('SELECT 1 FROM apps WHERE container = ? AND name = ?').get(host, name)) throw conflict(`You already have an app named ${name}`);
+    const count = db.prepare("SELECT COUNT(*) AS n FROM apps WHERE container = ? AND target = 'main'").get(host).n;
+    if (plan.max_apps != null && count >= plan.max_apps) {
+      throw conflict(`Your ${plan.name} package allows ${plan.max_apps} app${plan.max_apps === 1 ? '' : 's'}. Upgrade the package (Plans & billing) to add more.`);
+    }
     const t = APP_TYPES[b.type];
     if (!t) throw bad('Pick an application type');
     // Port: the type's default, or the next free one in the app host
@@ -379,17 +483,24 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     if (b.port && used.has(port)) throw conflict(`Port ${port} is already used by another of your apps`);
     while (used.has(port)) port += 1;
     const v = validate({ ...b, port });
-    if (self) billing?.assertCanAfford(user.id, plan.price_day);
-    const room = await appHost.checkRoom(user, plan);
-    if (room) return res.status(409).json({ error: `The main server has no room for this plan right now. ${room}` });
+    if (self && !current) billing?.assertCanAfford(user.id, plan.price_day);
+    if (!current) {
+      const room = await appHost.checkRoom(user, plan);
+      if (room) return res.status(409).json({ error: `The main server has no room for this package right now. ${room}` });
+    }
+    await checkRepo(v.repo, v.branch, b.gitToken);
     const env = parseEnv(b.env);
     const now = Date.now();
     const id = Number(db.prepare(`INSERT INTO apps (user_id, container, name, type, repo_url, branch, root_dir, output_dir, install_cmd, build_cmd, start_cmd,
         port, env_enc, git_token_enc, status, created_at, updated_at, target, plan_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisioning', ?, ?, 'main', ?)`)
       .run(user.id, host, name, v.type, v.repo, v.branch, v.rootDir, v.outputDir, v.installCmd, v.buildCmd, v.startCmd, v.port,
         seal(JSON.stringify(env)), b.gitToken ? seal(String(b.gitToken).slice(0, 500)) : null, now, now, plan.id).lastInsertRowid);
-    billing?.start({ userId: user.id, kind: 'app', name: `${host}/${name}`, planId: plan.id, priceDay: plan.price_day, by: req.session.username });
-    audit.log({ ...who(req), action: 'app_create', target: `${host}/${name}`, result: 'success', detail: `main server, plan ${plan.name}, ${v.type} ${v.repo}#${v.branch}` });
+    if (!current) {
+      db.prepare('UPDATE users SET hosting_plan_id = ? WHERE id = ?').run(plan.id, user.id);
+      billing?.start({ userId: user.id, kind: 'app', name: host, planId: plan.id, priceDay: plan.price_day, by: req.session.username });
+      audit.log({ ...who(req), action: 'hosting_subscribe', target: user.username, result: 'success', detail: `${plan.name}, ${plan.price_day} paisa/day` });
+    }
+    audit.log({ ...who(req), action: 'app_create', target: `${host}/${name}`, result: 'success', detail: `main server, package ${plan.name}, ${v.type} ${v.repo}#${v.branch}` });
     provision(who(req), user, id);
     return res.status(201).json({ app: publicApp(appsDb.get(id)) });
   }
@@ -453,7 +564,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
   router.get('/apps/:id/logs', wrap(async (req, res) => {
     const a = mineApp(req);
     needRunning(a.container);
-    const r = await execStream(a.container, ['bash', '-c', PM2_SCRIPT], { env: { OP: 'logs', APP_NAME: a.name, REMOVE_FILES: '0' }, timeoutMs: 30_000 });
+    const r = await execStream(a.container, ['bash', '-c', PM2_SCRIPT], { env: { ...runAs(a.container), OP: 'logs', APP_NAME: a.name, REMOVE_FILES: '0' }, timeoutMs: 30_000 });
     res.set('Cache-Control', 'no-store');
     res.json({ text: r.output });
   }));
@@ -463,7 +574,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     const name = req.params.name;
     if (!ownsContainer(req.session, name) || !containers.exists(name)) throw forbidden('You can only see your own servers');
     needRunning(name);
-    const r = await execStream(name, ['bash', '-c', PM2_SCRIPT], { env: { OP: 'status', APP_NAME: 'x', REMOVE_FILES: '0' }, timeoutMs: 30_000 });
+    const r = await execStream(name, ['bash', '-c', PM2_SCRIPT], { env: { ...runAs(name), OP: 'status', APP_NAME: 'x', REMOVE_FILES: '0' }, timeoutMs: 30_000 });
     let list = [];
     try { list = JSON.parse(r.output.slice(r.output.indexOf('['))); } catch { list = []; }
     res.set('Cache-Control', 'no-store');
@@ -494,17 +605,19 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     let note = '';
     if (containers.snapshot(a.container)?.status === 'Running') {
       const r = await execStream(a.container, ['bash', '-c', PM2_SCRIPT], {
-        env: { OP: 'delete', APP_NAME: a.name, REMOVE_FILES: req.body?.removeFiles === true ? '1' : '0' }, timeoutMs: 60_000,
+        env: { ...runAs(a.container), OP: 'delete', APP_NAME: a.name, REMOVE_FILES: req.body?.removeFiles === true ? '1' : '0' }, timeoutMs: 60_000,
       });
       if (r.code !== 0) throw new Error(`Could not stop the app in the server: ${r.output.slice(-300)}`);
     } else {
       note = ' The server was stopped, so its PM2 entry and files were left in place.';
     }
     db.prepare('DELETE FROM apps WHERE id = ?').run(a.id);
-    if (a.target === 'main') {
-      billing?.end('app', `${a.container}/${a.name}`, req.session.username);
+    if (a.target === 'main' && !db.prepare("SELECT 1 FROM apps WHERE container = ? AND target = 'main'").get(a.container)) {
+      // Last app gone: the package ends (no paying for an empty host) and the host is removed
+      billing?.end('app', a.container, req.session.username);
+      db.prepare('UPDATE users SET hosting_plan_id = NULL WHERE id = ?').run(a.user_id);
       appHost?.release(a.container).catch((err) => console.error(`App host ${a.container}: ${err.message}`));
-      note += ' Billing for it stopped.';
+      note += ' That was your last app on the main server, so your hosting package ended and billing stopped.';
     }
     audit.log({ ...who(req), action: 'app_delete', target: `${a.container}/${a.name}`, result: 'success', detail: req.body?.removeFiles ? 'files removed' : 'files kept' });
     res.json({ ok: true, note });

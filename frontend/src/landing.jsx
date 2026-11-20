@@ -35,7 +35,7 @@ const FAQ = [
   ['Are my databases backed up?', 'Yes, every night to a separate disk. You can download your dumps from the Backups page.'],
 ];
 
-const KINDS = [['app', 'Apps'], ['server', 'Servers'], ['database', 'Databases']];
+const KINDS = [['app', 'App hosting'], ['server', 'Servers'], ['database', 'Databases']];
 
 function Pricing({ info }) {
   const [kind, setKind] = useState('app');
@@ -58,6 +58,7 @@ function Pricing({ info }) {
                 {p.cpu && <li>{p.cpu} vCPU</li>}
                 <li>{ram(p.memoryMb)} RAM</li>
                 {p.diskGb && <li>{p.diskGb} GB SSD</li>}
+                {kind === 'app' && <li>{p.maxApps == null ? 'Unlimited apps' : `${p.maxApps} app${p.maxApps === 1 ? '' : 's'}`}</li>}
                 {kind === 'app' && <li>Free subdomain + SSL</li>}
                 {kind === 'database' && <li>Nightly backups</li>}
                 {kind === 'server' && <li>Root access, terminal, SSH</li>}

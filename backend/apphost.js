@@ -1,4 +1,5 @@
 // "Main server" deploy target: users without a VPS of their own deploy apps straight from the panel.
+// The user picks a hosting PACKAGE (an "app" plan: CPU / RAM / disk / max apps / daily price); the host has that size.
 //
 // Each such user gets ONE panel-managed LXD container on the main server, apps-<username>. The user never has to set it
 // up: the panel creates it on the first app, installs the runtime, grows its limits by each app's plan and deletes it
@@ -26,24 +27,21 @@ export function createAppHost({ containers, allocator }) {
     return next;
   };
 
-  // Size the host needs for its apps (+ one more plan when adding)
-  function wanted(host, extraPlan = null) {
-    const rows = db.prepare("SELECT plan_id FROM apps WHERE container = ? AND target = 'main'").all(host);
-    const list = rows.map((r) => plans.get(r.plan_id)).filter(Boolean);
-    if (extraPlan) list.push(extraPlan);
-    const sum = (k) => list.reduce((t, p) => t + (p[k] || 0), 0);
+  // The host is sized by the user's hosting PACKAGE (an "app" plan: CPU, RAM, disk, max apps). No package = the floor.
+  const packageOf = (userId) => plans.get(db.prepare('SELECT hosting_plan_id FROM users WHERE id = ?').get(userId)?.hosting_plan_id || 0) || null;
+  function wanted(plan) {
     return {
-      cpu: Math.max(FLOOR.cpu, ...list.map((p) => p.cpu || 0)), // cores are shared by the apps, the biggest one decides
-      memoryMb: Math.max(FLOOR.memoryMb, sum('memory_mb')),
-      diskGb: Math.max(FLOOR.diskGb, sum('disk_gb')),
+      cpu: Math.max(FLOOR.cpu, plan?.cpu || 0),
+      memoryMb: Math.max(FLOOR.memoryMb, plan?.memory_mb || 0),
+      diskGb: Math.max(FLOOR.diskGb, plan?.disk_gb || 0),
     };
   }
 
-  // Is there room on the main server for this plan? Returns error text or null.
+  // Is there room on the main server for this package? Returns error text or null.
   async function checkRoom(user, plan) {
     const host = hostNameFor(user.username);
     const exists = containers.exists(host);
-    const w = wanted(host, plan);
+    const w = wanted(plan);
     const r = await allocator.check({ cpu: w.cpu, memory: w.memoryMb * MiB, disk: w.diskGb * GiB, exclude: exists ? host : null });
     return r.ok ? null : r.errors.join(' ');
   }
@@ -62,7 +60,7 @@ export function createAppHost({ containers, allocator }) {
   function ensure(user, progress = () => {}) {
     const host = hostNameFor(user.username);
     return serial(host, async () => {
-      const w = wanted(host);
+      const w = wanted(packageOf(user.id));
       if (!containers.exists(host)) {
         progress(`Creating your app host ${host} on the main server`);
         containerMeta.createdByPanel(host, { image: HOST_IMAGE, by: MANAGED_BY });
@@ -91,7 +89,7 @@ export function createAppHost({ containers, allocator }) {
     });
   }
 
-  async function resize(host, w = wanted(host)) {
+  async function resize(host, w) {
     await updateInstance(host, (next, cur) => {
       next.config['limits.cpu'] = String(w.cpu);
       next.config['limits.memory'] = `${w.memoryMb}MiB`;
@@ -108,7 +106,7 @@ export function createAppHost({ containers, allocator }) {
     return serial(host, async () => {
       if (!isAppHost(host)) return;
       const left = db.prepare('SELECT COUNT(*) AS n FROM apps WHERE container = ?').get(host).n;
-      if (left) { await resize(host).catch(() => {}); return; }
+      if (left) return;
       if (containers.snapshot(host)?.status === 'Running') await changeState(host, 'stop', () => {}, { force: true }).catch(() => {});
       await deleteInstance(host);
       db.transaction(() => { users.unassignContainer(host); containerMeta.remove(host); })();
@@ -117,5 +115,11 @@ export function createAppHost({ containers, allocator }) {
     });
   }
 
-  return { ensure, release, checkRoom, hostNameFor, isAppHost, toMiB, toGiB };
+  // After a package change: resize the running host to the new package
+  function applyPackage(user) {
+    const host = hostNameFor(user.username);
+    return serial(host, async () => { if (containers.exists(host)) await resize(host, wanted(packageOf(user.id))); });
+  }
+
+  return { ensure, release, checkRoom, applyPackage, packageOf, hostNameFor, isAppHost, toMiB, toGiB };
 }

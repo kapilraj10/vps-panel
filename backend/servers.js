@@ -375,7 +375,8 @@ export function createServers({ io, containers, allocator, stacks = null, billin
         containerMeta.remove(name);
       })();
       billing?.end('server', name, req.session.username);
-      billing?.endPrefix('app', `${name}/`, req.session.username); // apps on a deleted app host
+      billing?.end('app', name, req.session.username); // hosting package of a deleted app host
+      db.prepare("UPDATE users SET hosting_plan_id = NULL WHERE id IN (SELECT user_id FROM billed_resources WHERE kind = 'app' AND name = ?)").run(name);
       return `Deleted ${name}`;
     }));
   }));
