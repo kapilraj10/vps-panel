@@ -284,3 +284,25 @@ test('main server target: app plan, managed app host made, runtime + deploy run,
   await until(async () => (await sup.get('/api/containers/apps-bob')).status === 404, 20000);
   assert.ok(one("SELECT ended_at FROM billed_resources WHERE name = 'apps-bob/shop'").ended_at);
 });
+
+test('starter plans and the automatic app subdomain', async () => {
+  assert.equal((await ana.post('/api/billing/plans/starter')).status, 403);
+  const s = await sup.post('/api/billing/plans/starter');
+  assert.equal(s.status, 200);
+  assert.ok(s.data.created.includes('App Mini') && s.data.created.includes('DB Mini') && s.data.created.includes('Server Small'));
+  assert.equal((await sup.post('/api/billing/plans/starter')).data.created.length, 0, 'idempotent');
+  const mini = s.data.plans.find((p) => p.name === 'App Mini');
+  await sup.post(`/api/billing/users/${ids.ana}/tx`, { amount: 100000 });
+  const r = await ana.post('/api/apps', { target: 'main', planId: mini.id, name: 'Shop_1'.toLowerCase().replace('_', '-'), type: 'node', repoUrl: 'https://github.com/x/shop.git' });
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  assert.equal(r.data.app.priceDay, 1500);
+  const done = await until(async () => { const d = (await ana.get(`/api/apps/${r.data.app.id}`)).data.app; return d.status === 'running' && d.domains.length ? d : null; }, 30000);
+  assert.equal(done.domains[0].hostname, 'shop-1-ana.gyannportal.com');
+  assert.equal(done.domains[0].status, 'manual', 'no Cloudflare API in tests: route is shown for the admin');
+  // a redeploy does not add a second one
+  assert.equal((await ana.post(`/api/apps/${r.data.app.id}/deploy`)).status, 202);
+  await until(async () => (await ana.get(`/api/apps/${r.data.app.id}`)).data.app.status === 'running' && !(await ana.get(`/api/apps/${r.data.app.id}`)).data.app.deploying);
+  assert.equal((await ana.get('/api/domains')).data.domains.filter((d) => d.appId === r.data.app.id).length, 1);
+  await sup.put('/api/settings', { auto_app_domains: false });
+  assert.equal((await sup.get('/api/settings')).data.settings.auto_app_domains, false);
+});

@@ -10,6 +10,7 @@ import { clientIp, isAdmin, ownsContainer } from './auth.js';
 import { roomFor } from './containers.js';
 import { wrap, bad, forbidden, notFound, conflict, int, str } from './http.js';
 import { plans } from './billing.js';
+import { cfConfigured, removeRoute } from './cloudflare.js';
 
 const APP_NAME_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/;
 const BRANCH_RE = /^[A-Za-z0-9._/-]{1,100}$/;
@@ -145,6 +146,7 @@ const appsDb = {
 export function createApps({ io, containers, appHost = null, billing = null }) {
   const router = express.Router();
   const busy = new Map(); // appId -> deployment id
+  let onDeployed = () => {}; // set by server.js: automatic subdomain
   const who = (req) => ({ username: req.session.username, ip: clientIp(req) });
 
   const publicApp = (a) => {
@@ -157,6 +159,8 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
       port: a.port, envKeys, hasGitToken: !!a.git_token_enc, status: a.status, lastDeployAt: a.last_deploy_at,
       deploying: busy.has(a.id), createdAt: a.created_at, target: a.target || 'server', planId: a.plan_id ?? null,
       planName: a.plan_id ? plans.get(a.plan_id)?.name || null : null,
+      // What the owner actually pays per day for it (apps on their own server are included in the server's price)
+      priceDay: a.target === 'main' ? db.prepare("SELECT price_day FROM billed_resources WHERE kind = 'app' AND name = ? AND ended_at IS NULL").get(`${a.container}/${a.name}`)?.price_day ?? plans.get(a.plan_id)?.price_day ?? null : null,
       domains: db.prepare("SELECT hostname, status FROM domains WHERE app_id = ? AND status != 'removed'").all(a.id),
     };
   };
@@ -345,6 +349,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
       onFinish: (ok) => {
         appsDb.setStatus(a.id, ok ? 'running' : 'failed');
         if (ok) db.prepare('UPDATE apps SET last_deploy_at = ? WHERE id = ?').run(Date.now(), a.id);
+        if (ok) Promise.resolve(onDeployed(a.id)).then((d) => { if (d) emitApp(a); }).catch((err) => console.error(`Auto domain for app ${a.id}: ${err.message}`));
         after(ok);
       },
     });
@@ -475,8 +480,17 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     const a = mineApp(req);
     if (req.body?.confirm !== a.name) throw bad(`Type "${a.name}" to confirm`);
     if (busy.has(a.id)) throw conflict('Wait for the running task to finish');
-    const doms = db.prepare("SELECT hostname FROM domains WHERE app_id = ? AND status NOT IN ('removed', 'rejected')").all(a.id);
+    const doms = db.prepare("SELECT hostname FROM domains WHERE app_id = ? AND status NOT IN ('removed', 'rejected') AND requested_by != 'auto'").all(a.id);
     if (doms.length) throw conflict(`Remove its domains first: ${doms.map((d) => d.hostname).join(', ')}`);
+    // The automatic subdomain belongs to the app and goes with it
+    for (const d of db.prepare("SELECT * FROM domains WHERE app_id = ? AND requested_by = 'auto'").all(a.id)) {
+      if (d.route_synced) {
+        if (!cfConfigured()) throw conflict(`${d.hostname} is live but the Cloudflare API is not configured, so it cannot be removed from here`);
+        await removeRoute(d.hostname.toLowerCase(), d.dns_record_id);
+      }
+      db.prepare('DELETE FROM domains WHERE id = ?').run(d.id);
+      audit.log({ ...who(req), action: 'domain_remove', target: d.hostname, result: 'success', detail: 'automatic domain of a deleted app' });
+    }
     let note = '';
     if (containers.snapshot(a.container)?.status === 'Running') {
       const r = await execStream(a.container, ['bash', '-c', PM2_SCRIPT], {
@@ -496,5 +510,5 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     res.json({ ok: true, note });
   }));
 
-  return { router, appsDb };
+  return { router, appsDb, setOnDeployed: (fn) => { onDeployed = fn; } };
 }

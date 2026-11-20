@@ -274,6 +274,30 @@ export function createBilling({ stopServer = async () => {}, stopDatabase = asyn
     audit.log({ ...who(req), action: 'plan_create', target: p.name, result: 'success', detail: `${p.kind}, ${p.price_day} paisa/day` });
     res.status(201).json({ plan: planView(plans.get(id)) });
   });
+  // One click: a sensible set of plans for every kind (prices in paisa per day; edit them afterwards). Existing names are kept.
+  const STARTER = [
+    ['server', 'Server Small', 1, 1024, 20, 4000, 'A small VPS for one website or API'],
+    ['server', 'Server Medium', 2, 2048, 40, 7500, 'Several apps, or one busy app'],
+    ['server', 'Server Large', 4, 4096, 80, 14000, 'Heavy apps and builds'],
+    ['app', 'App Mini', 1, 512, 5, 1500, 'A small website or API, no server to manage'],
+    ['app', 'App Standard', 1, 1024, 10, 2500, 'Most Node.js / Next.js / Python apps'],
+    ['app', 'App Pro', 2, 2048, 20, 4500, 'Busy apps with heavier builds'],
+    ['database', 'DB Mini', null, 256, null, 1500, 'Small PostgreSQL / MySQL / MongoDB'],
+    ['database', 'DB Standard', null, 1024, null, 3000, 'Production database'],
+  ];
+  router.post('/billing/plans/starter', requireSuperAdmin, (req, res) => {
+    const now = Date.now();
+    const made = [];
+    STARTER.forEach(([kind, name, cpu, mem, disk, price, description], i) => {
+      if (db.prepare('SELECT 1 FROM plans WHERE kind = ? AND name = ?').get(kind, name)) return;
+      db.prepare(`INSERT INTO plans (kind, name, cpu, memory_mb, disk_gb, price_day, active, sort, description, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`).run(kind, name, cpu, mem, disk, price, i, description, now, now);
+      made.push(name);
+    });
+    audit.log({ ...who(req), action: 'plan_starter', result: 'success', detail: made.join(', ') || 'all existed' });
+    res.json({ created: made, plans: plans.list().map(planView) });
+  });
+
   router.put('/billing/plans/:id', requireSuperAdmin, (req, res) => {
     const old = plans.get(req.params.id);
     if (!old) throw notFound('No such plan');

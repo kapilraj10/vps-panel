@@ -223,7 +223,42 @@ export function createDomains({ containers, monitoring }) {
       }
     }
   }
+  // Automatic subdomain after an app's first good deploy: <app>-<user>.<suffix> (one label, so Cloudflare's free
+  // *.suffix certificate covers it). Only names the panel builds itself are auto-approved; nothing a user typed.
+  async function autoForApp(appId) {
+    if (settings.get('auto_app_domains') === false) return null;
+    const a = db.prepare('SELECT a.*, u.username FROM apps a JOIN users u ON u.id = a.user_id WHERE a.id = ?').get(appId);
+    if (!a) return null;
+    if (db.prepare("SELECT 1 FROM domains WHERE app_id = ? AND status NOT IN ('removed', 'rejected')").get(a.id)) return null;
+    const suffix = (settings.get('auto_app_domain_suffix') || (settings.get('allowed_domain_suffixes') || [])[0] || '').toLowerCase();
+    if (!suffix || !HOST_RE.test(`x.${suffix}`)) return null;
+    const base = `${a.name}-${a.username}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').slice(0, 55).replace(/^-|-$/g, '');
+    const rules = cfConfigured() ? await tunnelRules().catch(() => []) : [];
+    const taken = (h) => db.prepare('SELECT 1 FROM domains WHERE hostname = ?').get(h) || rules?.some((r) => r.hostname?.toLowerCase() === h);
+    let hostname = null;
+    for (let i = 1; i < 50 && !hostname; i += 1) {
+      const h = `${i === 1 ? base : `${base}-${i}`}.${suffix}`;
+      if (!RESERVED.includes(h.split('.')[0]) && HOST_RE.test(h) && !taken(h)) hostname = h;
+    }
+    if (!hostname) return null;
+    const now = Date.now();
+    const id = Number(db.prepare(`INSERT INTO domains (hostname, user_id, container, app_id, port, status, requested_by, approved_by, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'pending', 'auto', 'auto', ?, ?)`).run(hostname, a.user_id, a.container, a.id, a.port, now, now).lastInsertRowid);
+    let result = 'success';
+    let detail = `${a.container}:${a.port}`;
+    try {
+      const r = await sync(domainsDb.get(id));
+      if (r.manual) detail += `; Cloudflare API not configured, add the route by hand -> ${r.target}`;
+    } catch (err) {
+      domainsDb.set(id, { status: 'error', error: err.message });
+      result = 'failure';
+      detail = err.message;
+    }
+    audit.log({ username: 'system', action: 'domain_auto', target: hostname, result, detail: `${a.username}/${a.name}: ${detail}` });
+    return domainsDb.get(id);
+  }
+
   const start = () => { const loop = () => sweep().catch(() => {}).finally(() => setTimeout(loop, 15 * 60_000).unref()); setTimeout(loop, 30_000).unref(); };
 
-  return { router, start };
+  return { router, start, autoForApp };
 }

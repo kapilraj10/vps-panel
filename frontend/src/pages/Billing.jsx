@@ -245,7 +245,9 @@ export default function Billing({ tab = 'wallets' }) {
   return (
     <>
       <PageHeader title="Billing" sub="Prepaid wallets, plans and daily prices for users who deploy on your servers"
-        actions={sup && tab === 'plans' && <button type="button" className="btn btn--primary" onClick={() => setEdit({})}><Icon name="plus" /> New plan</button>} />
+        actions={sup && tab === 'plans' && <div className="btn-row">
+          <button type="button" className="btn" onClick={async () => { const r = await run(() => api('/api/billing/plans/starter', { method: 'POST' }), (x) => (x.created.length ? `Added ${x.created.length} plans` : 'All starter plans already exist')); if (r) plans.reload(); }}>Add starter plans</button>
+          <button type="button" className="btn btn--primary" onClick={() => setEdit({})}><Icon name="plus" /> New plan</button></div>} />
       <ErrorNote error={ov.error || plans.error} onRetry={() => { ov.reload(); plans.reload(); }} />
       {s && !s.enabled && <Note tone="warn">Billing is off: nothing is charged and nobody is stopped.</Note>}
       <div className="kpis">

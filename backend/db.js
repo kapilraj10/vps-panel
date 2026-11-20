@@ -722,6 +722,8 @@ export const SETTING_DEFAULTS = {
   alert_backup_disk_free: 15, // percent free on /mnt/backup
   alert_sustain_minutes: 5,
   allowed_domain_suffixes: ['gyannportal.com'], // users may request subdomains of these; others need admin approval anyway
+  auto_app_domains: true, // after an app's first good deploy it gets <app>-<user>.<suffix> automatically
+  auto_app_domain_suffix: '', // empty = the first allowed suffix
   terminal_idle_minutes: 15,
   terminal_max_minutes: 240,
   // VPS fleet

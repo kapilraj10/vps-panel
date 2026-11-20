@@ -9,6 +9,7 @@ import { UserCreateServer } from './Servers.jsx';
 
 const STATUS_TONE = { running: 'good', deploying: 'warn', provisioning: 'warn', failed: 'bad', stopped: 'neutral', new: 'neutral' };
 const where = (a) => (a.target === 'main' ? 'Main server' : a.container);
+const priceText = (a) => (a.target === 'main' ? (a.priceDay != null ? `${fmtMoney(a.priceDay)}/day${a.planName ? ` · ${a.planName}` : ''}` : 'plan removed') : 'included in the server');
 
 // Where to deploy: 1) one of my servers, 2) the main server (no VPS needed, the panel sets it up), 3) a new server
 function TargetPicker({ value, onChange, hasServers, plans, planId, onPlan, onNewServer }) {
@@ -152,7 +153,7 @@ function AppDetail({ id }) {
   return (
     <>
       <PageHeader back={href('apps')} title={<span className="title-with-badge">{a.name} <Badge tone={STATUS_TONE[a.status]} dot>{a.deploying ? 'deploying' : a.status}</Badge></span>}
-        sub={`${a.typeLabel} on ${where(a)}${a.planName ? ` (${a.planName})` : ''} · port ${a.port}${a.lastDeployAt ? ` · deployed ${ago(a.lastDeployAt)}` : ''}`}
+        sub={`${a.typeLabel} on ${where(a)} · ${priceText(a)} · port ${a.port}${a.lastDeployAt ? ` · deployed ${ago(a.lastDeployAt)}` : ''}`}
         actions={(
           <div className="btn-row">
             <button type="button" className="btn btn--primary" disabled={a.deploying || !serverUp} onClick={() => op('deploy')}><Icon name="git" size={14} /> Deploy</button>
@@ -224,11 +225,12 @@ export default function Apps({ selected }) {
       <Card pad={false}>
         {!data ? <div className="pad"><SkeletonRows /></div> : apps.length ? (
           <div className="table-wrap"><table className="table">
-            <thead><tr><th>Application</th><th>Server</th><th>Status</th><th>Repository</th><th>Domains</th><th>Last deploy</th>{me.isAdmin && <th>Owner</th>}</tr></thead>
+            <thead><tr><th>Application</th><th>Server</th><th>Price</th><th>Status</th><th>Repository</th><th>Domains</th><th>Last deploy</th>{me.isAdmin && <th>Owner</th>}</tr></thead>
             <tbody>{apps.map((a) => (
               <tr key={a.id} className="click" onClick={() => go(`apps/${a.id}`)}>
                 <td><a href={href(`apps/${a.id}`)}><strong>{a.name}</strong></a><small className="block muted">{a.typeLabel} · port {a.port}</small></td>
                 <td>{where(a)}</td>
+                <td className="muted">{priceText(a)}</td>
                 <td><Badge tone={STATUS_TONE[a.status]} dot>{a.deploying ? 'deploying' : a.status}</Badge></td>
                 <td className="muted ellipsis">{a.repoUrl.replace(/^https:\/\//, '')}#{a.branch}</td>
                 <td>{a.domains.map((d) => <span key={d.hostname} className="chip">{d.hostname}</span>)}</td>

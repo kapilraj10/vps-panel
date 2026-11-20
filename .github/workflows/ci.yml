@@ -27,7 +27,9 @@ jobs:
         run: npm ci --no-audit --no-fund
         working-directory: backend
       - name: Backend tests
-        run: npm test
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test.log || { grep -E '^✖|Error|expected|actual' test.log | head -20 | sed 's/^/::error::/'; exit 1; }
         working-directory: backend
       - name: Helper tests (backup, security, upgrade)
         run: node --test system/test/*.cjs

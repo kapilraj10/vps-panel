@@ -44,6 +44,9 @@ export async function tunnelRules() {
   return (cfg.ingress || []).map((r) => ({ hostname: r.hostname || null, service: r.service, path: r.path || null }));
 }
 
+// "*.example.com" matches "a.example.com" (one label or more, like cloudflared)
+export const wildcardMatches = (pattern, hostname) => !!pattern && pattern.startsWith('*.') && hostname.toLowerCase().endsWith(pattern.slice(1).toLowerCase());
+
 // Adds (or updates) the rule for a hostname we manage, keeping the catch-all last.
 export async function addRoute(hostname, service, { managed }) {
   const cfg = await getConfig();
@@ -53,8 +56,10 @@ export async function addRoute(hostname, service, { managed }) {
   const rule = { hostname, service };
   if (idx >= 0) ingress[idx] = { ...ingress[idx], ...rule };
   else {
-    const catchAll = ingress.findIndex((r) => !r.hostname && !r.path);
-    if (catchAll >= 0) ingress.splice(catchAll, 0, rule);
+    // cloudflared uses the FIRST matching rule, so a new hostname goes before any wildcard that would also match it
+    // (e.g. *.gyannportal.com -> localhost:80) and before the catch-all
+    const before = ingress.findIndex((r) => (!r.hostname && !r.path) || wildcardMatches(r.hostname, hostname));
+    if (before >= 0) ingress.splice(before, 0, rule);
     else ingress.push(rule, { service: 'http_status:404' });
   }
   await putConfig({ ...cfg, ingress });
