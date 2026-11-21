@@ -29,6 +29,14 @@ export function createSignup({ startSession, addCredit = null }) {
     });
   });
 
+  // Latency test on the landing page: the browser times a few of these round trips. Tiny, never cached. Behind
+  // Cloudflare the cf-ray header ends in the edge location that served the visitor (e.g. "-KTM"), shown as "via KTM".
+  router.get('/api/public/ping', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const colo = /-([A-Z]{3})$/.exec(String(req.headers['cf-ray'] || ''))?.[1] || null;
+    res.json({ ok: true, colo });
+  });
+
   router.post('/api/register', async (req, res) => {
     const ip = clientIp(req);
     if (settings.get('signup_enabled') === false) return res.status(403).json({ error: 'Sign-up is closed. Ask the administrator for an account.' });

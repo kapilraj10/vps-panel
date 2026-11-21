@@ -1,7 +1,8 @@
 // Applications: git deploys run INSIDE the owner's container through LXD exec, managed by PM2 there.
 // The scripts below are fixed text; user values reach them only as environment variables, never spliced in.
 // User build/start commands run as root inside the user's own container, which they already control fully
-// through the terminal, so nothing here gives them more than they have. Nothing ever runs on the host.
+// through the terminal, so nothing here gives them more than they have. On the host the panel only adds the LXD proxy
+// device that forwards 127.0.0.1:<port> to the app (portforward.js) and checks that the port answers.
 import express from 'express';
 import { execFile } from 'node:child_process';
 import { db, audit, users } from './db.js';
@@ -14,6 +15,7 @@ import { plans } from './billing.js';
 import { cfConfigured, removeRoute } from './cloudflare.js';
 import { sshRun, resolvePublic } from './sshexec.js';
 import { customerServers } from './myservers.js';
+import { forwardingEnabled, ensureForward, removeForward, forwardStatus, portProblem, healthCheck, localTarget } from './portforward.js';
 
 const APP_NAME_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/;
 const BRANCH_RE = /^[A-Za-z0-9._/-]{1,100}$/;
@@ -121,7 +123,7 @@ if [ "\${APP_KIND:-}" = docker ]; then
   docker run -d --name "sc-app-$APP_NAME" --restart unless-stopped --env-file "$CFG/docker.env" -e PORT="$PORT" -p "$PORT:$PORT" \
     \${DOCKER_MEMORY:+--memory "$DOCKER_MEMORY"} --security-opt no-new-privileges "sc-app-$APP_NAME" >/dev/null
   docker image prune -f >/dev/null 2>&1 || true
-  echo "==> Deployed. Listening on port $PORT."
+  echo "==> Started. Listening on port $PORT inside the server."
   exit 0
 fi
 if [ -n "$INSTALL_CMD" ]; then echo "==> Install: $INSTALL_CMD"; bash -c "$INSTALL_CMD"; fi
@@ -130,7 +132,7 @@ echo "==> Starting with PM2"
 pm2 delete "$APP_NAME" >/dev/null 2>&1 || true
 pm2 start "$CFG/ecosystem.json"
 pm2 save
-echo "==> Deployed. Listening on port $PORT inside the server."
+echo "==> Started. Listening on port $PORT inside the server."
 `;
 
 const PM2_SCRIPT = `set -eu
@@ -326,7 +328,8 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
 
   // Runs a script in the container as a recorded deployment (deploy, runtime install, start/stop/restart)
   // `req` may also be an actor { username, ip } for background work
-  function runRecorded(req, a, kind, script, env, { timeoutMs = 30 * 60_000, onFinish = () => {} } = {}) {
+  // `post(say)` runs on the panel after the script succeeded (port forwarding, health check); false = deploy failed
+  function runRecorded(req, a, kind, script, env, { timeoutMs = 30 * 60_000, onFinish = () => {}, post = null } = {}) {
     const { username, ip } = req.session ? who(req) : req;
     const depId = Number(db.prepare('INSERT INTO deployments (app_id, kind, by_user, status, started_at) VALUES (?, ?, ?, ?, ?)')
       .run(a.id, kind, username, 'running', Date.now()).lastInsertRowid);
@@ -335,19 +338,22 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     emitApp(a);
     audit.log({ username, ip, action: `app_${kind}`, target: `${a.container}/${a.name}`, result: 'requested' });
     let log = '';
-    execApp(a, script, env, {
-      timeoutMs, asRoot: kind === 'runtime',
-      onOutput: (text) => { log = (log + text).slice(-LOG_KEEP); emitLog(a, depId, text); },
-    })
+    const out = (text) => { log = (log + text).slice(-LOG_KEEP); emitLog(a, depId, text); };
+    execApp(a, script, env, { timeoutMs, asRoot: kind === 'runtime', onOutput: out })
       .then(({ code }) => ({ ok: code === 0, code }))
-      .catch((err) => { const msg = `\n[Sampanna Cloud] ${err.message}\n`; log += msg; emitLog(a, depId, msg); return { ok: false, code: -1 }; })
+      .catch((err) => { out(`\n[Sampanna Cloud] ${err.message}\n`); return { ok: false, code: -1 }; })
+      .then(async (r) => {
+        if (!r.ok || !post) return r;
+        const ok = await Promise.resolve(post((line) => out(`${line}\n`))).catch((err) => { out(`[Sampanna Cloud] ${err.message}\n`); return false; });
+        return ok ? r : { ok: false, code: 'post-deploy check' };
+      })
       .then(({ ok, code }) => {
         const commit = /@@COMMIT ([0-9a-f]{40})/.exec(log)?.[1] || null;
         db.prepare('UPDATE deployments SET status = ?, log = ?, commit_sha = ?, finished_at = ? WHERE id = ?')
           .run(ok ? 'success' : 'failed', log, commit, Date.now(), depId);
         busy.delete(a.id);
         onFinish(ok);
-        audit.log({ username, ip, action: `app_${kind}`, target: `${a.container}/${a.name}`, result: ok ? 'success' : 'failure', detail: ok ? commit : `exit code ${code}` });
+        audit.log({ username, ip, action: `app_${kind}`, target: `${a.container}/${a.name}`, result: ok ? 'success' : 'failure', detail: ok ? commit : typeof code === 'number' ? `exit code ${code}` : code });
         emitApp(a);
       });
     return depId;
@@ -393,10 +399,13 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     if (appHost?.isAppHost(container)) throw bad('That is your managed app host. Pick "Main server" to add apps to it.');
     const name = str(b.name, { max: 32, name: 'App name' }).toLowerCase();
     if (!APP_NAME_RE.test(name)) throw bad('App name: 3-32 lowercase letters, digits or dashes');
-    const v = validate(b);
+    const t0 = APP_TYPES[b.type];
+    if (!t0) throw bad('Pick an application type');
+    const asked = b.port != null && b.port !== '' ? int(b.port, { min: 1024, max: 65535, name: 'Port' }) : null;
+    validate({ ...b, port: asked ?? t0.port });
     if (db.prepare('SELECT 1 FROM apps WHERE container = ? AND name = ?').get(container, name)) throw conflict(`${name} already exists on ${container}`);
+    const v = validate({ ...b, port: await pickPort(container, asked ?? t0.port, asked != null, container) });
     await checkRepo(v.repo, v.branch, b.gitToken, { publicOnly: !isAdmin(req.session) });
-    if (db.prepare('SELECT 1 FROM apps WHERE container = ? AND port = ?').get(container, v.port)) throw conflict(`Port ${v.port} is already used by another app on ${container}`);
     const env = parseEnv(b.env);
     const ownerId = isAdmin(req.session) ? (users.ownersOf(container)[0]?.id || req.session.id) : req.session.id;
     const now = Date.now();
@@ -415,6 +424,8 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     if (v.port !== a.port && db.prepare('SELECT 1 FROM apps WHERE container = ? AND port = ? AND id != ?').get(a.container, v.port, a.id)) {
       throw conflict(`Port ${v.port} is already used by another app on ${a.container}`);
     }
+    // Takes effect on the next deploy, which forwards the new port and removes the old proxy device
+    if (v.port !== a.port && onLxd(a)) await pickPort(a.container, v.port, true, a.container).catch((err) => { if (!(err.status === 409 && /another app on/.test(err.message))) throw err; });
     let envEnc = a.env_enc;
     if (b.env !== undefined) {
       // Values left as "********" keep their saved value, so secrets never have to travel back to the browser
@@ -461,15 +472,162 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
       ENV_SH_B64: b64(envSh), DOTENV_B64: b64(dotenv), DOCKERENV_B64: b64(dockerEnv), ECOSYSTEM_B64: b64(JSON.stringify(ecosystem(a, env), null, 2)),
       WRITE_DOTENV: writeDotenv ? '1' : '0',
     }, {
+      post: async (say) => {
+        if (onLxd(a) && forwardingEnabled()) {
+          if (!(await forwardStep(a, say))) return false;
+          if (!(await healthStep(a, say))) return false;
+        }
+        await Promise.resolve(onDeployed(a.id, say)).catch((err) => say(`[Sampanna Cloud] Public hostname: ${err.message}`));
+        say('==> Deployed.');
+        return true;
+      },
       onFinish: (ok) => {
         appsDb.setStatus(a.id, ok ? 'running' : 'failed');
         if (ok) db.prepare('UPDATE apps SET last_deploy_at = ? WHERE id = ?').run(Date.now(), a.id);
-        if (ok) Promise.resolve(onDeployed(a.id)).then((d) => { if (d) emitApp(a); }).catch((err) => console.error(`Auto domain for app ${a.id}: ${err.message}`));
         after(ok);
       },
     });
     return depId;
   }
+
+  // ---------- host port forwarding (LXD proxy device) + health check ----------
+  const onLxd = (a) => a.target !== 'vps';
+  const otherAppUses = (container, port, exceptId) => !!db.prepare('SELECT 1 FROM apps WHERE container = ? AND port = ? AND id != ?').get(container, port, exceptId);
+
+  // Makes port<PORT> exist on the app's container and drops the device of a port the app used before. Never throws.
+  async function forwardApp(a, say = () => {}) {
+    const fresh = appsDb.get(a.id) || a;
+    const r = await ensureForward(fresh.container, fresh.port);
+    say({
+      unchanged: `Proxy device ${r.device} already in place`,
+      created: `Created proxy device ${r.device}: listen=tcp:127.0.0.1:${fresh.port} connect=tcp:127.0.0.1:${fresh.port}`,
+      updated: `Updated proxy device ${r.device} to listen=tcp:127.0.0.1:${fresh.port} connect=tcp:127.0.0.1:${fresh.port}`,
+      manual: `Port ${fresh.port} is already forwarded by the device ${r.device} (added by hand); left as it is`,
+    }[r.action]);
+    const old = fresh.forwarded_port;
+    if (old && old !== fresh.port && !otherAppUses(fresh.container, old, fresh.id)) {
+      await removeForward(fresh.container, old)
+        .then((gone) => { if (gone) say(`Removed the old proxy device port${old}`); })
+        .catch((err) => say(`Could not remove the old proxy device port${old}: ${err.message}`));
+    }
+    db.prepare('UPDATE apps SET forwarded_port = ? WHERE id = ?').run(fresh.port, fresh.id);
+    return r;
+  }
+
+  async function forwardStep(a, say) {
+    say(`==> Forwarding port ${a.port} (host 127.0.0.1:${a.port} -> ${a.container} 127.0.0.1:${a.port})`);
+    try {
+      await forwardApp(a, say);
+      return true;
+    } catch (err) {
+      say(`[Sampanna Cloud] Port forwarding failed: ${err.message}`);
+      return false;
+    }
+  }
+
+  async function healthStep(a, say) {
+    say(`==> Health check: http://127.0.0.1:${a.port} from the host`);
+    const r = await healthCheck(a.port, { say: (l) => say(`  ${l}`) });
+    if (r.ok) return true;
+    say(`[Sampanna Cloud] FAILED: nothing answers on host port ${a.port} (${r.error}). The public URL would show 502 Bad Gateway.`);
+    await diagnose(a, say);
+    return false;
+  }
+
+  // What to look at when the health check fails: PM2 state, listening sockets in the container, the proxy device
+  async function diagnose(a, say) {
+    say('==> Diagnostics');
+    try {
+      const r = await execApp(a, PM2_SCRIPT, { OP: 'status', APP_NAME: a.name, REMOVE_FILES: '0' }, { timeoutMs: 30_000 });
+      let list = [];
+      try { list = JSON.parse(r.output.slice(r.output.indexOf('['))); } catch { list = []; }
+      const p = list.find((x) => x.name === a.name);
+      say(p ? `PM2: ${a.name} is ${p.pm2_env?.status || 'unknown'} (restarts: ${p.pm2_env?.restart_time ?? 0})` : `PM2: no process named ${a.name} inside ${a.container}`);
+    } catch (err) { say(`PM2: could not ask (${err.message})`); }
+    try {
+      const r = await execStream(a.container, ['ss', '-tlnp'], { timeoutMs: 20_000 });
+      say(`Listening TCP sockets inside ${a.container} (ss -tlnp):`);
+      say(r.output.trimEnd() || '(none)');
+      const portRe = new RegExp(`:${a.port}\\s`);
+      const lines = r.output.split('\n').filter((l) => portRe.test(l));
+      if (!lines.length) say(`Nothing listens on port ${a.port} inside the container. Does the app use the PORT variable (${a.port})?`);
+      else if (!lines.some((l) => new RegExp(`(127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\*|\\[::\\]|\\[::ffff:127\\.0\\.0\\.1\\]):${a.port}\\s`).test(l))) {
+        say(`Port ${a.port} is bound to another address only. The app must listen on 0.0.0.0 or 127.0.0.1.`);
+      }
+    } catch (err) { say(`ss -tlnp: could not run (${err.message})`); }
+    try {
+      const s = await forwardStatus(a.container, a.port);
+      say(`Proxy device: ${{ ok: `${s.device} present (${s.config.listen} -> ${s.config.connect})`, other: `${s.device} forwards the port`, different: `${s.device} exists but with listen=${s.config.listen} connect=${s.config.connect}`, missing: `port${a.port} MISSING` }[s.status]}`);
+    } catch (err) { say(`Proxy device: could not check (${err.message})`); }
+  }
+
+  // Port for a new app in an LXD container. Host ports are shared by all containers (cloudflared reaches every app at
+  // localhost:<port>), so a port is free only if no other container's app uses it and nothing on the host holds it.
+  // explicit = the user typed it: refuse a taken one with a clear message; otherwise move on to the next free port.
+  async function pickPort(container, wanted, explicit, label) {
+    const here = new Set(db.prepare('SELECT port FROM apps WHERE container = ?').all(container).map((r) => r.port));
+    const elsewhere = new Set();
+    if (forwardingEnabled()) {
+      for (const r of db.prepare("SELECT port, forwarded_port FROM apps WHERE container != ? AND target != 'vps'").all(container)) {
+        elsewhere.add(r.port);
+        if (r.forwarded_port) elsewhere.add(r.forwarded_port);
+      }
+    }
+    const problem = (port) => (forwardingEnabled() ? portProblem(container, port).catch(() => null) : null);
+    if (explicit) {
+      if (here.has(wanted)) throw conflict(`Port ${wanted} is already used by another app on ${label}`);
+      if (elsewhere.has(wanted)) throw conflict(`Port ${wanted} is already taken on the host by another app. Pick another port.`);
+      const p = await problem(wanted);
+      if (p) throw conflict(p);
+      return wanted;
+    }
+    for (let port = wanted; port <= 65535; port += 1) {
+      if (!here.has(port) && !elsewhere.has(port) && !(await problem(port))) return port;
+    }
+    throw conflict('No free port left');
+  }
+
+  // Network facts for the app page: container, IP, port, proxy device state
+  async function networkOf(a) {
+    if (!onLxd(a)) return { applicable: false };
+    const out = { applicable: true, enabled: forwardingEnabled(), container: a.container, ip: containers.snapshot(a.container)?.ip || null, port: a.port, hostTarget: localTarget(a.port) };
+    if (!forwardingEnabled()) return { ...out, forward: { status: 'disabled' } };
+    try {
+      const s = await forwardStatus(a.container, a.port);
+      out.forward = { status: s.status, device: s.device, listen: s.config?.listen || null, connect: s.config?.connect || null };
+      if (s.status === 'missing' || s.status === 'different') out.forward.problem = await portProblem(a.container, a.port).catch(() => null);
+    } catch (err) {
+      out.forward = { status: 'error', error: err.message };
+    }
+    return out;
+  }
+
+  router.get('/apps/:id/network', wrap(async (req, res) => {
+    const a = mineApp(req);
+    res.set('Cache-Control', 'no-store');
+    res.json(await networkOf(a));
+  }));
+
+  // "Fix port forwarding": re-runs the forward step, then points the app's public hostnames at it again
+  router.post('/apps/:id/forward', wrap(async (req, res) => {
+    const a = mineApp(req);
+    if (!onLxd(a)) throw bad('This app runs on your own VPS; there is no port to forward');
+    if (!forwardingEnabled()) throw conflict('Port forwarding is turned off on this panel (PORT_FORWARD=off)');
+    if (!containers.exists(a.container)) throw notFound('The server for this app does not exist');
+    if (busy.has(a.id)) throw conflict('Wait for the running task to finish');
+    const log = [];
+    const say = (l) => log.push(l);
+    try {
+      await forwardApp(a, say);
+    } catch (err) {
+      audit.log({ ...who(req), action: 'app_forward', target: `${a.container}/${a.name}`, result: 'failure', detail: err.message });
+      throw err.status ? err : conflict(err.message);
+    }
+    await Promise.resolve(onDeployed(a.id, say)).catch((err) => say(`Public hostname: ${err.message}`));
+    audit.log({ ...who(req), action: 'app_forward', target: `${a.container}/${a.name}`, result: 'success', detail: `port${a.port}` });
+    emitApp(a);
+    res.json({ log, network: await networkOf(appsDb.get(a.id)) });
+  }));
 
   const runAs = (container) => (appHost?.isAppHost(container) ? { RUN_AS: 'app' } : {});
   const runtimesFor = (a) => ['node', a.type === 'python' ? 'python' : null, a.type === 'laravel' ? 'php' : null, APP_TYPES[a.type]?.docker ? 'docker' : null].filter(Boolean).join(',');
@@ -574,10 +732,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     const t = APP_TYPES[b.type];
     if (!t) throw bad('Pick an application type');
     // Port: the type's default, or the next free one in the app host
-    let port = b.port ? int(b.port, { min: 1024, max: 65535, name: 'Port' }) : t.port;
-    const used = new Set(db.prepare('SELECT port FROM apps WHERE container = ?').all(host).map((r) => r.port));
-    if (b.port && used.has(port)) throw conflict(`Port ${port} is already used by another of your apps`);
-    while (used.has(port)) port += 1;
+    const port = await pickPort(host, b.port ? int(b.port, { min: 1024, max: 65535, name: 'Port' }) : t.port, !!b.port, 'your app host');
     const v = validate({ ...b, port });
     if (self && !current) billing?.assertCanAfford(user.id, plan.price_day);
     if (!current) {
@@ -717,12 +872,13 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
 
     // 1. take it down where it is (best effort; files stay)
     const off = await execApp(a, PM2_SCRIPT, { OP: 'delete', APP_NAME: a.name, REMOVE_FILES: '0' }, { timeoutMs: 60_000 }).catch((err) => ({ code: -1, output: err.message }));
+    await dropForwards(a);
     for (const d of db.prepare("SELECT * FROM domains WHERE app_id = ? AND requested_by = 'auto'").all(a.id)) {
       if (d.route_synced && cfConfigured()) await removeRoute(d.hostname.toLowerCase(), d.dns_record_id).catch(() => {});
       db.prepare('DELETE FROM domains WHERE id = ?').run(d.id);
     }
     // 2. point the row at the new place
-    db.prepare('UPDATE apps SET target = ?, container = ?, server_id = ?, port = ?, status = ?, updated_at = ? WHERE id = ?')
+    db.prepare('UPDATE apps SET target = ?, container = ?, server_id = ?, port = ?, forwarded_port = NULL, status = ?, updated_at = ? WHERE id = ?')
       .run(next.target, next.container, next.server_id, port, next.target === 'main' ? 'provisioning' : 'new', Date.now(), a.id);
     if (next.target === 'main' && !appHost.packageOf(owner.id)) {
       db.prepare('UPDATE users SET hosting_plan_id = ? WHERE id = ?').run(next.plan.id, owner.id);
@@ -740,6 +896,18 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     else if (next.target === 'vps' || containers.snapshot(next.container)?.status === 'Running') startDeploy(req, moved);
     res.json({ app: publicApp(appsDb.get(a.id)), oldCopyStopped: off.code === 0 });
   }));
+
+  // Removes the app's proxy devices (current and previously forwarded port) unless another app in the container uses
+  // that port. Best effort: returns a note for the user instead of failing the delete or the move.
+  async function dropForwards(a) {
+    if (!onLxd(a) || !forwardingEnabled() || !containers.exists(a.container)) return '';
+    const failed = [];
+    for (const p of new Set([a.forwarded_port, a.port].filter(Boolean))) {
+      if (otherAppUses(a.container, p, a.id)) continue;
+      await removeForward(a.container, p).catch((err) => failed.push(`port${p} (${err.message})`));
+    }
+    return failed.length ? ` The proxy device ${failed.join(', ')} could not be removed.` : '';
+  }
 
   router.delete('/apps/:id', wrap(async (req, res) => {
     const a = mineApp(req);
@@ -767,6 +935,7 @@ export function createApps({ io, containers, appHost = null, billing = null }) {
     } else {
       note = ' The server was stopped, so its PM2 entry and files were left in place.';
     }
+    note += await dropForwards(a);
     db.prepare('DELETE FROM apps WHERE id = ?').run(a.id);
     if (a.target === 'main' && !db.prepare("SELECT 1 FROM apps WHERE container = ? AND target = 'main'").get(a.container)) {
       // Last app gone: the package ends (no paying for an empty host) and the host is removed

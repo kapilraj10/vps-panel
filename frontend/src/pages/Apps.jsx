@@ -185,6 +185,49 @@ function AppForm({ open, onClose, app, onSaved }) {
   );
 }
 
+// Where the app is reachable from the host: cloudflared on the host goes to localhost:<port>, which the LXD proxy
+// device port<PORT> forwards into the container. "Fix port forwarding" re-creates the device and re-points the domains.
+const FWD = {
+  ok: ['good', '✅ forwarded'], other: ['good', '✅ forwarded'], missing: ['bad', '❌ missing'],
+  different: ['warn', '⚠ wrong settings'], error: ['bad', '❌ could not check'], disabled: ['neutral', 'turned off'],
+};
+function AppNetwork({ a, disabled }) {
+  const run = useAction();
+  const { data, error, reload } = useApi(`/api/apps/${a.id}/network`);
+  const [log, setLog] = useState(null);
+  const [fixing, setFixing] = useState(false);
+  useEffect(() => { reload(); }, [a.port, a.status, a.deploying, a.lastDeployAt]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (error) return <Card title="Network"><ErrorNote error={error} /></Card>;
+  if (!data) return <Card title="Network"><SkeletonRows rows={3} /></Card>;
+  if (!data.applicable) return null;
+  const f = data.forward || {};
+  const [tone, label] = FWD[f.status] || ['neutral', f.status];
+  const fix = async () => {
+    setFixing(true);
+    const r = await run(() => api(`/api/apps/${a.id}/forward`, { method: 'POST' }), 'Port forwarding is in place');
+    setFixing(false);
+    if (r) setLog(r.log);
+    reload();
+  };
+  return (
+    <Card title="Network" sub="How the internet reaches this app"
+      actions={data.enabled && <button type="button" className="btn btn--small" disabled={disabled || fixing} onClick={fix}><Icon name="refresh" size={14} /> {fixing ? 'Fixing…' : 'Fix port forwarding'}</button>}>
+      <dl className="facts">
+        <div><dt>Container</dt><dd><code>{data.container}</code></dd></div>
+        <div><dt>Container IP</dt><dd>{data.ip ? <code>{data.ip}</code> : '–'}</dd></div>
+        <div><dt>Internal port</dt><dd>{data.port}</dd></div>
+        <div><dt>Proxy device</dt><dd><Badge tone={tone}>{label}</Badge> <code>{f.device || `port${data.port}`}</code>{f.listen ? <span className="muted small"> {f.listen} → {f.connect}</span> : null}</dd></div>
+        <div><dt>Tunnel target</dt><dd><code>{data.hostTarget}</code></dd></div>
+      </dl>
+      {f.status === 'other' && <p className="muted small">Forwarded by a device added by hand ({f.device}); the panel leaves it as it is.</p>}
+      {f.problem && <Note tone="warn">{f.problem}</Note>}
+      {f.status === 'error' && <Note tone="bad">{f.error}</Note>}
+      {f.status === 'disabled' && <Note>Port forwarding is turned off on this panel (PORT_FORWARD=off); domains go to the container IP.</Note>}
+      {log && <pre className="log">{log.join('\n')}</pre>}
+    </Card>
+  );
+}
+
 function AppDetail({ id }) {
   const { socket, cts, me } = useLive();
   const run = useAction();
@@ -254,6 +297,7 @@ function AppDetail({ id }) {
           <p className="muted small">Runtime missing in the server? <button type="button" className="linkish" disabled={a.deploying || !serverUp} onClick={() => op('runtime')}>Install runtime</button> (git, Node.js, PM2{a.type === 'python' ? ', Python' : a.type === 'laravel' ? ', PHP, Composer' : ''}).</p>
         </Card>
       </div>
+      <AppNetwork a={a} disabled={a.deploying} />
       <Tabs tabs={[['deploy', 'Deploy output'], ['history', `History (${data.deployments.length})`], ['logs', 'App logs']]} value={tab} onChange={(t) => (t === 'logs' ? showLogs() : setTab(t))} />
       {tab === 'deploy' && <Card><pre className="log log--tall" ref={logRef}>{liveLog || (a.deploying ? 'Waiting for output…' : 'Press Deploy to pull the latest code, build it and (re)start it with PM2. Output streams here.')}</pre></Card>}
       {tab === 'history' && (

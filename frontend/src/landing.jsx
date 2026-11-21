@@ -62,6 +62,94 @@ const FAQ = [
   ['Are my databases backed up?', 'Yes, every night to a separate disk. You can download your dumps from the Backups page.'],
 ];
 
+// ---------- latency test ----------
+// The visitor's browser times small requests to /api/public/ping (the same path their app traffic takes: Cloudflare,
+// then our servers in Kathmandu). One warm-up request first, so DNS / TLS / connection setup is not counted.
+const PINGS = 10;
+const RATINGS = [[30, 'Excellent', 'good', '✓'], [80, 'Good', 'good', '✓'], [150, 'Fair', 'warn', '!'], [Infinity, 'Slow', 'bad', '!']];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function pingOnce() {
+  const url = `/api/public/ping?n=${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
+  const t0 = performance.now();
+  const r = await fetch(url, { cache: 'no-store' });
+  const body = await r.json();
+  const wall = performance.now() - t0;
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  // Resource Timing gives the network round trip without the browser's own JSON work, where available
+  const e = performance.getEntriesByName(new URL(url, window.location.href).href).pop();
+  const net = e && e.responseStart > 0 && e.requestStart > 0 ? e.responseStart - e.requestStart : null;
+  return { ms: net != null && net > 0 ? net : wall, colo: body.colo };
+}
+
+function LatencyTest() {
+  const [samples, setSamples] = useState([]);
+  const [state, setState] = useState('idle'); // idle | running | done | error
+  const [colo, setColo] = useState(null);
+
+  async function run() {
+    setState('running');
+    setSamples([]);
+    try {
+      setColo((await pingOnce()).colo);
+      const out = [];
+      for (let i = 0; i < PINGS; i += 1) {
+        out.push((await pingOnce()).ms);
+        setSamples([...out]);
+        await sleep(120);
+      }
+      setState('done');
+    } catch {
+      setState('error');
+    }
+  }
+
+  const sorted = [...samples].sort((a, b) => a - b);
+  const median = sorted.length ? (sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2) : null;
+  const jitter = samples.length > 1 ? samples.slice(1).reduce((t, v, i) => t + Math.abs(v - samples[i]), 0) / (samples.length - 1) : null;
+  const rating = median != null ? RATINGS.find(([max]) => median < max) : null;
+  const top = Math.max(50, ...samples);
+  const ms = (v) => `${Math.round(v)} ms`;
+
+  return (
+    <section id="speed" className="lp-section" aria-labelledby="speed-title">
+      <h2 id="speed-title">How fast is it from where you are?</h2>
+      <p className="lp-lead">Measure the round trip from your browser to our servers in Kathmandu, the same way your visitors' requests travel. It sends {PINGS} tiny requests; nothing is installed or stored.</p>
+      <div className="lp-speed">
+        <div className="lp-speed__head">
+          <div aria-live="polite">
+            <div className="lp-speed__value">{median != null ? ms(median) : '— ms'}</div>
+            <div className="lp-speed__label">
+              {state === 'idle' && 'Median round trip, after you run the test'}
+              {state === 'running' && `Measuring… ${samples.length}/${PINGS}`}
+              {state === 'error' && 'The test could not reach the server. Check your connection and try again.'}
+              {state === 'done' && <>Median round trip{rating && <> · <span className={`badge badge--${rating[2]}`}><span aria-hidden="true">{rating[3]} </span>{rating[1]}</span></>}</>}
+            </div>
+          </div>
+          <button type="button" className="btn btn--primary btn--big" onClick={run} disabled={state === 'running'}>
+            {state === 'running' ? 'Testing…' : state === 'idle' ? 'Run speed test' : 'Test again'}
+          </button>
+        </div>
+        <div className="lp-speed__bars" role="img" aria-label={samples.length ? `Round trips: ${samples.map((v) => Math.round(v)).join(', ')} ms` : 'No measurements yet'}>
+          {Array.from({ length: PINGS }, (_, i) => {
+            const v = samples[i];
+            return <span key={i} className={`lp-speed__bar${v == null ? ' is-empty' : ''}`} style={{ height: v == null ? undefined : `${Math.max(6, (v / top) * 100)}%` }} title={v == null ? undefined : `Request ${i + 1}: ${ms(v)}`} />;
+          })}
+        </div>
+        {samples.length > 0 && (
+          <dl className="lp-speed__facts">
+            <div><dt>Fastest</dt><dd>{ms(sorted[0])}</dd></div>
+            <div><dt>Slowest</dt><dd>{ms(sorted[sorted.length - 1])}</dd></div>
+            {jitter != null && <div><dt>Jitter</dt><dd>{ms(jitter)}</dd></div>}
+            {colo && <div><dt>Cloudflare edge</dt><dd>{colo}</dd></div>}
+          </dl>
+        )}
+        <p className="lp-speed__note">Under 30 ms feels instant, under 80 ms is good for websites and APIs. Results depend on your internet provider and Wi-Fi.</p>
+      </div>
+    </section>
+  );
+}
+
 const KINDS = [['app', 'App hosting'], ['server', 'Servers'], ['database', 'Databases']];
 
 function Pricing({ info, signup }) {
@@ -158,6 +246,7 @@ function Landing() {
         <nav aria-label="Main">
           <a href="#features">Features</a>
           <a href="#pricing">Pricing</a>
+          <a href="#speed">Speed test</a>
           <a href="#faq">FAQ</a>
           <a className="btn" href="/login">Log in</a>
           {signup && <a className="btn btn--primary" href="/register">Sign up</a>}
@@ -210,6 +299,8 @@ function Landing() {
             </table>
           </div>
         </section>
+
+        <LatencyTest />
 
         <section className="lp-section" aria-labelledby="steps-title">
           <h2 id="steps-title">Live in three steps</h2>

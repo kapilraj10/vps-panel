@@ -1,6 +1,7 @@
 // TEST ONLY: a small in-memory imitation of the LXD REST API on a unix socket, so the panel's real code paths
 // (REST calls, background operations, exec websockets) can be exercised without LXD. Never used by the panel.
 import http from 'node:http';
+import net from 'node:net';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { WebSocketServer } from 'ws';
@@ -55,6 +56,32 @@ export function startFakeLxd(socketPath, { instances: initial = {} } = {}) {
   const ok = (res, metadata, headers) => send(res, 200, { type: 'sync', status_code: 200, metadata }, headers);
   const err = (res, code, msg) => send(res, code, { type: 'error', error_code: code, error: msg });
 
+  // Proxy devices (listen=tcp:127.0.0.1:N) of running instances get a real listener on the host, like LXD's forkproxy:
+  // it answers HTTP 404 "fake app" (any status counts as up), or, with config user.fake.app-down=true, accepts the
+  // connection and resets it, which is what curl sees through a real proxy device when nothing listens inside.
+  const proxies = new Map(); // port -> { server, owner, down }
+  function syncProxies() {
+    const want = new Map();
+    for (const i of instances.values()) {
+      if (i.status !== 'Running') continue;
+      for (const d of Object.values(i.devices || {})) {
+        const m = d?.type === 'proxy' && /^tcp:127\.0\.0\.1:(\d+)$/.exec(d.listen || '');
+        if (m) want.set(Number(m[1]), { owner: i.name, down: i.config['user.fake.app-down'] === 'true' });
+      }
+    }
+    for (const [port, p] of proxies) {
+      const w = want.get(port);
+      if (!w || w.owner !== p.owner || w.down !== p.down) { p.server.close(); p.server.closeAllConnections?.(); proxies.delete(port); }
+    }
+    for (const [port, w] of want) {
+      if (proxies.has(port)) continue;
+      const server = w.down ? net.createServer((sock) => sock.destroy()) : http.createServer((_q, r) => { r.writeHead(404); r.end(`fake app in ${w.owner}`); });
+      server.on('error', () => { if (proxies.get(port)?.server === server) proxies.delete(port); });
+      server.listen(port, '127.0.0.1');
+      proxies.set(port, { server, ...w });
+    }
+  }
+
   // exec: ops waiting for websockets
   const execs = new Map(); // opId -> { secrets, socks, cmd, env, interactive, resolve }
 
@@ -103,6 +130,7 @@ export function startFakeLxd(socketPath, { instances: initial = {} } = {}) {
             Object.assign(i.config, body.config);
             Object.assign(i.devices, body.devices);
           }
+          syncProxies();
         });
         return asyncReply(res, op);
       }
@@ -125,6 +153,7 @@ export function startFakeLxd(socketPath, { instances: initial = {} } = {}) {
           const op = newOp(async () => {
             const map = { start: 'Running', stop: 'Stopped', restart: 'Running', freeze: 'Frozen', unfreeze: 'Running' };
             i.status = map[body.action];
+            syncProxies();
           });
           return asyncReply(res, op);
         }
@@ -138,6 +167,7 @@ export function startFakeLxd(socketPath, { instances: initial = {} } = {}) {
             etag += 1;
             i.config = body.config;
             i.devices = body.devices;
+            syncProxies();
           });
           return asyncReply(res, op);
         }
@@ -154,6 +184,7 @@ export function startFakeLxd(socketPath, { instances: initial = {} } = {}) {
           const op = newOp(async () => {
             if (i.status === 'Running') throw new Error('Instance is running');
             instances.delete(name);
+            syncProxies();
           });
           return asyncReply(res, op);
         }
@@ -249,7 +280,8 @@ export function startFakeLxd(socketPath, { instances: initial = {} } = {}) {
     }
     const script = ex.cmd.join(' ');
     let out = `ran ${ex.cmd[0]}\n`;
-    if (script.includes('@@COMMIT')) out += `==> Cloning ${ex.env.REPO}\n@@COMMIT ${'a'.repeat(40)}\n==> Deployed\n`;
+    if (ex.cmd[0] === 'ss') out = 'State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process\nLISTEN 0      4096       0.0.0.0:22        0.0.0.0:*     users:(("sshd",pid=180,fd=3))\n';
+    if (script.includes('@@COMMIT')) out += `==> Cloning ${ex.env.REPO}\n@@COMMIT ${'a'.repeat(40)}\n==> Starting with PM2\n==> Started. Listening on port ${ex.env.PORT} inside the server.\n`;
     if (ex.env.WANT_PM2 !== undefined) {
       out += '==> Updating package lists\n';
       if (ex.env.WANT_PM2 === '1') out += '@@VERSION node v22.0.0\n@@VERSION pm2 6.0.0\n';
@@ -274,6 +306,11 @@ export function startFakeLxd(socketPath, { instances: initial = {} } = {}) {
 
   try { fs.unlinkSync(socketPath); } catch { /* none */ }
   return new Promise((resolve) => server.listen(socketPath, () => resolve({
-    instances, files, calls, addInstance, close: () => new Promise((r) => { wss.close(); server.close(r); server.closeAllConnections?.(); }),
+    instances, files, calls, addInstance, proxies, syncProxies,
+    close: () => new Promise((r) => {
+      for (const p of proxies.values()) { p.server.close(); p.server.closeAllConnections?.(); }
+      proxies.clear();
+      wss.close(); server.close(r); server.closeAllConnections?.();
+    }),
   })));
 }
