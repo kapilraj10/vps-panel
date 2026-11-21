@@ -646,6 +646,11 @@ const MIGRATIONS = [
       ALTER TABLE domains ADD COLUMN verified_at INTEGER;
     `,
   },
+  {
+    version: 11,
+    name: 'apps: host port forwarded to the app (LXD proxy device port<N>)',
+    sql: 'ALTER TABLE apps ADD COLUMN forwarded_port INTEGER;',
+  },
 ];
 
 function migrate() {

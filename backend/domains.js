@@ -1,6 +1,8 @@
 // Domains: users request hostnames for their apps/servers, an admin approves, and the panel adds the
-// Cloudflare Tunnel route (hostname -> http://<container-ip>:<port>) and DNS record. Container IPs stay internal:
-// users only ever see their public URL. SSL is terminated by Cloudflare; the panel checks the edge certificate.
+// Cloudflare Tunnel route and DNS record. cloudflared runs on the host, so an APP's route is http://localhost:<port>,
+// reached through the LXD proxy device port<PORT> the panel keeps on the app's container (portforward.js). A domain for
+// a bare server port (no app) still goes to http://<container-ip>:<port>. Container IPs stay internal: users only ever
+// see their public URL. SSL is terminated by Cloudflare; the panel checks the edge certificate.
 import express from 'express';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
@@ -14,6 +16,7 @@ import { db, audit, settings } from './db.js';
 import { clientIp, isAdmin, ownsContainer, requireAdmin } from './auth.js';
 import { cfConfigured, addRoute, removeRoute, tunnelRules, tunnelTarget } from './cloudflare.js';
 import { wrap, bad, forbidden, notFound, conflict, int } from './http.js';
+import { forwardingEnabled, ensureForward, forwardStatus, localTarget } from './portforward.js';
 
 const HOST_RE = /^(?=.{4,253}$)(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/;
 const RESERVED = ['panel', 'cloud', 'ssh', 'admin', 'api', 'mail', 'www', 'auth', 'login'];
@@ -79,7 +82,11 @@ export function createDomains({ containers, monitoring }) {
     return out;
   };
 
+  // The app behind an app domain in an LXD container (null for VPS apps and bare server ports)
+  const lxdAppOf = (d) => (d.app_id && !/^vps-\d+$/.test(d.container) ? db.prepare('SELECT id, container, port, forwarded_port FROM apps WHERE id = ?').get(d.app_id) : null);
   function targetFor(d) {
+    const app = forwardingEnabled() ? lxdAppOf(d) : null;
+    if (app) return localTarget(app.port);
     const ip = containers.snapshot(d.container)?.ip;
     return ip ? `http://${ip}:${d.port}` : null;
   }
@@ -92,6 +99,13 @@ export function createDomains({ containers, monitoring }) {
   }
 
   async function sync(d) {
+    const app = forwardingEnabled() ? lxdAppOf(d) : null;
+    if (app) {
+      // The route relies on the proxy device: make sure it is there before pointing the hostname at localhost
+      if (d.port !== app.port) { domainsDb.set(d.id, { port: app.port }); d = { ...d, port: app.port }; }
+      await ensureForward(app.container, app.port);
+      if (!app.forwarded_port) db.prepare('UPDATE apps SET forwarded_port = ? WHERE id = ?').run(app.port, app.id);
+    }
     const target = targetFor(d);
     if (!target) throw conflict(`${d.container} has no IP address right now (is it running?)`);
     if (!cfConfigured()) {
@@ -267,6 +281,15 @@ export function createDomains({ containers, monitoring }) {
       const want = targetFor(d);
       const have = rules.find((r) => r.hostname?.toLowerCase() === d.hostname.toLowerCase())?.service;
       if (want && have !== want) {
+        // Never move a live route to localhost while the proxy device is missing: that is exactly the 502 case
+        const app = forwardingEnabled() ? lxdAppOf(d) : null;
+        if (app) {
+          const st = await forwardStatus(app.container, app.port).catch(() => null);
+          if (st?.status !== 'ok' && st?.status !== 'other') {
+            monitoring.raise('domain_route', `domain:${d.hostname}`, 'warning', `${d.hostname}: port ${app.port} is not forwarded from ${app.container}. Use "Fix port forwarding" on the app.`);
+            continue;
+          }
+        }
         try {
           await sync(d);
           audit.log({ username: 'system', action: 'domain_resync', target: d.hostname, result: 'success', detail: `${have} -> ${want}` });
@@ -311,7 +334,36 @@ export function createDomains({ containers, monitoring }) {
     return domainsDb.get(id);
   }
 
+  // After a deploy (or "Fix port forwarding"): give the app its automatic subdomain, or re-point the ones it has, and
+  // say in the deploy log which hostname goes where. A domain problem never fails the deploy itself.
+  async function publishApp(appId, say = () => {}) {
+    const a = db.prepare('SELECT id, target FROM apps WHERE id = ?').get(appId);
+    if (!a || a.target === 'vps') return null;
+    const report = (d) => {
+      const target = targetFor(d);
+      say(`==> Public hostname: https://${d.hostname} -> ${target || '(no target)'}`);
+      if (d.status === 'active') say(`DNS: CNAME ${d.hostname} -> ${tunnelTarget()} (proxied by Cloudflare)`);
+      else if (d.status === 'manual') say(`Cloudflare API is not configured on this panel: add the public hostname ${d.hostname} -> ${target} in the tunnel and a proxied CNAME to the tunnel by hand.`);
+      else if (d.status === 'error') say(`Route not set: ${d.error}`);
+      else say(`Status: ${d.status}${d.status === 'pending' ? ' (waiting for an administrator to approve it)' : ''}`);
+    };
+    const have = db.prepare("SELECT * FROM domains WHERE app_id = ? AND status NOT IN ('removed', 'rejected')").all(a.id);
+    if (!have.length) {
+      const d = await autoForApp(a.id);
+      if (d) report(d);
+      else say('==> Public hostname: none (automatic subdomains are off or no domain suffix is set). Add a domain on the Domains page.');
+      return d;
+    }
+    for (const d of have) {
+      if (['active', 'manual', 'error'].includes(d.status) && (!d.verify_token || d.verified_at)) {
+        try { await sync(d); } catch (err) { domainsDb.set(d.id, { status: 'error', error: err.message }); }
+      }
+      report(domainsDb.get(d.id));
+    }
+    return have[0];
+  }
+
   const start = () => { const loop = () => sweep().catch(() => {}).finally(() => setTimeout(loop, 15 * 60_000).unref()); setTimeout(loop, 30_000).unref(); };
 
-  return { router, start, autoForApp };
+  return { router, start, autoForApp, publishApp };
 }

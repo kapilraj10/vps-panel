@@ -155,3 +155,19 @@ body:has(.lp) { background: var(--paper); }
   .lp-foot__cols > div:last-child { grid-column: 1 / -1; } /* contact: full width, so the email never breaks */
   .lp-final { margin-left: 16px; margin-right: 16px; padding: 36px 16px; }
 }
+
+/* latency test */
+.lp-speed { margin-top: 20px; max-width: 760px; padding: 22px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow); }
+.lp-speed__head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.lp-speed__value { font-size: clamp(2.2rem, 6vw, 3rem); font-weight: 700; letter-spacing: -0.03em; line-height: 1; font-variant-numeric: tabular-nums; }
+.lp-speed__label { margin-top: 8px; color: var(--ink-2); font-size: 0.95rem; }
+.lp-speed__bars { display: flex; align-items: flex-end; gap: 2px; height: 72px; margin-top: 22px; padding-bottom: 1px; border-bottom: 1px solid var(--line); }
+.lp-speed__bar { flex: 1; min-width: 0; border-radius: 4px 4px 0 0; background: var(--s1); transition: height 0.25s ease; }
+.lp-speed__bar:hover { background: color-mix(in srgb, var(--s1) 75%, var(--ink)); }
+.lp-speed__bar.is-empty { height: 4px; background: var(--surface-2); }
+.lp-speed__facts { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 16px 0 0; }
+.lp-speed__facts dt { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.lp-speed__facts dd { margin: 2px 0 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.lp-speed__note { margin: 16px 0 0; color: var(--muted); font-size: 0.88rem; }
+@media (prefers-reduced-motion: reduce) { .lp-speed__bar { transition: none; } }
+@media (max-width: 420px) { .lp-speed { padding: 16px; } .lp-speed__head .btn--big { flex: 1 1 100%; justify-content: center; } }

@@ -17,9 +17,11 @@ fleet, PM2, Docker, backups, security) are unchanged; see the code next to each 
 | GET | `/apps` | all | own apps (admins: all) with `target` main / vps / server, package, VPS name |
 | POST | `/apps` | all | create. `target: 'main'` + `planId` (first app picks the hosting package) · `target: 'vps'` + `serverId` · `target: 'server'` + `container`. Fields: `name, type (node, express, nestjs, nextjs, react, static, python, laravel, docker), repoUrl, branch, rootDir, outputDir, installCmd, buildCmd, startCmd, port, env, gitToken`. Repo + branch checked with `git ls-remote` |
 | PUT | `/apps/:id` | owner | change settings (re-checks the repo when it changes) |
-| POST | `/apps/:id/deploy` · `/runtime` · `/start` · `/stop` · `/restart` | owner | recorded deployments, live log over the socket (`app:log`) |
+| POST | `/apps/:id/deploy` · `/runtime` · `/start` · `/stop` · `/restart` | owner | recorded deployments, live log over the socket (`app:log`). A deploy in an LXD container also forwards the port and health-checks it from the host (see PORT_FORWARDING.md) |
 | GET | `/apps/:id` · `/apps/:id/deployments/:dep` · `/apps/:id/logs` · `/apps/:id/env` | owner | details, history, logs, env (masked; `?reveal=1` audited) |
 | GET | `/apps/:id/stats` | owner | live CPU / RAM / restarts |
+| GET | `/apps/:id/network` | owner | container, container IP, port, tunnel target `http://localhost:<port>`, proxy device state (`ok` / `other` / `different` / `missing`) and any host-port conflict |
+| POST | `/apps/:id/forward` | owner | "Fix port forwarding": (re)creates the LXD proxy device `port<PORT>` and re-points the app's domains; returns `{log, network}` |
 | POST | `/apps/:id/move` | super admin | `{target, planId?, serverId?, container?}` |
 | DELETE | `/apps/:id` | owner | `{confirm: name}`; the last main-server app ends the package |
 | GET / PUT | `/hosting` | customer | hosting package: current, apps used, available; change (resizes the app host) |

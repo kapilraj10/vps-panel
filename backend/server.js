@@ -238,7 +238,7 @@ const appHost = createAppHost({ containers, allocator });
 const appsMod = createApps({ io, containers, appHost, billing });
 const containerTools = createContainerTools({ containers });
 const domains = createDomains({ containers, monitoring });
-appsMod.setOnDeployed((id) => domains.autoForApp(id));
+appsMod.setOnDeployed((id, say) => domains.publishApp(id, say));
 const sshKeys = createSshKeys({ containers });
 // VPS fleet: nodes + agents, SSH console, network diagnostics, PM2/Docker on every node
 const nodes = createNodes({ io, monitoring });
