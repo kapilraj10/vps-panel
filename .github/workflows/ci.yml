@@ -33,7 +33,8 @@ jobs:
       - name: Backend tests
         run: |
           set -o pipefail
-          npm test 2>&1 | tee test.log || { grep -E '^✖|Error|expected|actual' test.log | head -20 | sed 's/^/::error::/'; exit 1; }
+          # On failure: each failing test's name with its error message and location (TAP output in CI), as annotations
+          npm test 2>&1 | tee test.log || { grep -E "^not ok|^\s+(error|location|code|expected|actual):|^✖" test.log | grep -v "^\s*code: 'ERR_TEST_FAILURE'" | head -60 | sed 's/^/::error::/'; exit 1; }
         working-directory: backend
       - name: Helper tests (backup, security, upgrade)
         run: node --test system/test/*.cjs
